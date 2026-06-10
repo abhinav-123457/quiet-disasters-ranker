@@ -1152,11 +1152,17 @@ def generate_reasoning(cid, rank, features, idx, ctx):
                             companies, top_skills, career_text, ctx)
 
     # SENTENCE 2: Secondary strength (if significant)
+   # SENTENCE 2: Secondary strength (if significant)
     second_i, second_v = sorted_f[1]
     s2 = ""
     if second_v > 0.3:
         s2 = _secondary_sentence(second_i, cid, data, top_skills, career_text, ctx)
-
+        # drop secondary if it repeats a skill already named in the primary
+        if s2:
+            s1_skills = set(re.findall(r'([A-Z][A-Za-z ]+?) \(', s1))
+            s2_skills = set(re.findall(r'([A-Z][A-Za-z ]+?) \(', s2))
+            if s2_skills and (s2_skills & s1_skills):
+                s2 = ""
     # SENTENCE 3: Concern (data-driven)
     s3 = _concern_sentence(notice, years, response_rate,
                            country, location, companies)

@@ -4,7 +4,7 @@ import pandas as pd
 import os
 import time
 
-st.set_page_config(page_title="Redrob Ranker", layout="wide", page_icon="🏆")
+st.set_page_config(page_title="Quiet Disasters · AI Ranker", layout="wide", page_icon="🏆")
 
 st.markdown("""
 <style>
@@ -351,6 +351,181 @@ footer { display: none !important; }
     .main-content { padding: 32px 16px 48px; }
     .hero { padding: 48px 16px 40px; }
 }
+
+/* ════════════════════════════════════════════════════════════
+   ✦ ENHANCEMENT LAYER — animations only, appended (cascade-safe)
+   ════════════════════════════════════════════════════════════ */
+@keyframes fadeUp   { from{opacity:0; transform:translateY(16px)} to{opacity:1; transform:translateY(0)} }
+@keyframes fadeIn   { from{opacity:0} to{opacity:1} }
+@keyframes pop      { 0%{opacity:0; transform:scale(.85)} 60%{transform:scale(1.04)} 100%{opacity:1; transform:scale(1)} }
+@keyframes gradShift{ 0%{background-position:0% 50%} 50%{background-position:100% 50%} 100%{background-position:0% 50%} }
+@keyframes auroraDrift{
+  0%   { transform:translate(0,0) scale(1) }
+  33%  { transform:translate(4%,-3%) scale(1.08) }
+  66%  { transform:translate(-3%,4%) scale(1.04) }
+  100% { transform:translate(0,0) scale(1) }
+}
+@keyframes shimmer  { 0%{left:-60%} 60%{left:130%} 100%{left:130%} }
+@keyframes glowPulse{ 0%,100%{box-shadow:0 0 0 0 rgba(77,218,122,.5)} 50%{box-shadow:0 0 0 4px rgba(77,218,122,0)} }
+@keyframes rowIn    { from{opacity:0; transform:translateY(8px)} to{opacity:1; transform:translateY(0)} }
+
+/* Aurora background — drifting color fields behind everything */
+[data-testid="stAppViewContainer"]::before{
+  content:''; position:fixed; inset:-20% -10% -10% -10%; z-index:0; pointer-events:none;
+  background:
+    radial-gradient(38% 42% at 18% 20%, rgba(255,75,43,0.10) 0%, transparent 60%),
+    radial-gradient(34% 40% at 82% 12%, rgba(99,102,241,0.09) 0%, transparent 60%),
+    radial-gradient(40% 44% at 70% 88%, rgba(77,168,218,0.07) 0%, transparent 62%);
+  filter:blur(8px);
+  animation:auroraDrift 26s ease-in-out infinite;
+}
+/* Faint moving grid for depth */
+[data-testid="stAppViewContainer"]::after{
+  content:''; position:fixed; inset:0; z-index:0; pointer-events:none; opacity:.5;
+  background-image:
+    linear-gradient(rgba(120,130,180,0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(120,130,180,0.035) 1px, transparent 1px);
+  background-size:46px 46px;
+  mask-image:radial-gradient(circle at 50% 30%, #000 0%, transparent 75%);
+  -webkit-mask-image:radial-gradient(circle at 50% 30%, #000 0%, transparent 75%);
+}
+/* keep all real content above the aurora */
+.hero, .main-content { position:relative; z-index:1; }
+
+/* Entrances */
+.hero       { animation:fadeUp .65s cubic-bezier(.22,.61,.36,1) both; }
+.hero-sub   { animation:fadeIn 1s ease .25s both; }
+.card       { animation:fadeUp .55s cubic-bezier(.22,.61,.36,1) both;
+              transition:transform .2s ease, border-color .2s ease, box-shadow .2s ease; }
+.card:hover { transform:translateY(-2px); border-color:#23304d;
+              box-shadow:0 10px 40px -12px rgba(0,0,0,.6); }
+.chip       { animation:pop .5s cubic-bezier(.34,1.56,.64,1) both; }
+.chip-a{ animation-delay:.05s } .chip-b{ animation-delay:.15s } .chip-c{ animation-delay:.25s }
+
+/* Animated gradient hero title */
+.hero-title{
+  background:linear-gradient(100deg,#edeef5 0%,#edeef5 38%,#ff8a6b 50%,#edeef5 62%,#edeef5 100%);
+  background-size:220% auto;
+  -webkit-background-clip:text; background-clip:text;
+  -webkit-text-fill-color:transparent;
+  animation:gradShift 7s linear infinite;
+}
+.hero-title em{
+  -webkit-text-fill-color:#FF4B2B; color:#FF4B2B;
+}
+
+/* Live status dot — add a soft pulsing halo */
+.status-dot{ animation:blink 2.2s ease-in-out infinite, glowPulse 2.2s ease-in-out infinite; }
+
+/* Primary button — shimmer sweep + smoother lift */
+[data-testid="stButton"] > button[kind="primary"]{ position:relative; overflow:hidden; }
+[data-testid="stButton"] > button[kind="primary"]::after{
+  content:''; position:absolute; top:0; left:-60%; width:45%; height:100%;
+  background:linear-gradient(100deg, transparent, rgba(255,255,255,.35), transparent);
+  transform:skewX(-18deg); animation:shimmer 3.6s ease-in-out infinite;
+}
+[data-testid="stButton"] > button:active{ transform:translateY(0) scale(.985) !important; }
+
+/* Uploader: animate the dashed border tint on hover (already has hover color) */
+[data-testid="stFileUploader"]{ transition:border-color .25s ease, background .25s ease !important; }
+[data-testid="stFileUploader"]:hover{ background:rgba(255,75,43,0.02) !important; }
+
+/* Results reveal */
+.result-meta{ animation:fadeUp .5s ease both; }
+[data-testid="stDataFrame"]{ animation:fadeUp .55s ease .05s both;
+  transition:border-color .2s ease; }
+[data-testid="stDataFrame"]:hover{ border-color:#23304d !important; }
+[data-testid="stDownloadButton"] > button{ transition:all .18s ease !important; }
+[data-testid="stDownloadButton"] > button:hover{ transform:translateY(-1px); }
+
+/* Alerts gently fade in */
+[data-testid="stAlert"]{ animation:fadeIn .4s ease both; }
+
+/* Respect reduced-motion users */
+@media (prefers-reduced-motion: reduce){
+  *{ animation:none !important; }
+}
+
+/* ════════════════════════════════════════════════════════════
+   ✦ LAYOUT FIX — center into a narrow column, full-bleed hero,
+   shorter upload zone. (appended → wins the cascade)
+   ════════════════════════════════════════════════════════════ */
+.block-container{
+  max-width:720px !important;
+  margin:0 auto !important;
+  padding:0 20px 48px !important;
+}
+/* hero still spans the full viewport even though the column is narrow */
+.hero{
+  width:100vw !important;
+  margin-left:calc(50% - 50vw) !important;
+  padding:46px 24px 38px !important;
+}
+/* the orphaned wrapper no longer needs a width of its own */
+.main-content{ max-width:100% !important; padding:30px 0 0 !important; gap:14px !important; }
+/* shorter, less stretched upload drop-zone */
+[data-testid="stFileUploader"]{ min-height:124px !important; }
+[data-testid="stFileUploader"] section{ padding:20px 18px !important; }
+/* slightly tighter cards */
+.card{ padding:20px 22px !important; }
+
+/* ════════════════════════════════════════════════════════════
+   ✦ HERO POLISH — spotlight, title glow, accent line, chip hover
+   ════════════════════════════════════════════════════════════ */
+/* soft spotlight directly behind the title for depth */
+.hero-inner{ position:relative; }
+.hero-inner::before{
+  content:''; position:absolute; left:50%; top:38%;
+  width:620px; height:320px; transform:translate(-50%,-50%);
+  background:radial-gradient(ellipse at center, rgba(255,75,43,0.10) 0%, transparent 70%);
+  filter:blur(10px); pointer-events:none; z-index:0;
+  animation:fadeIn 1.2s ease both;
+}
+.hero-inner > *{ position:relative; z-index:1; }
+
+/* tighter, sleeker title + subtle glow */
+.hero-title{
+  font-size:clamp(2.3rem, 4.4vw, 3.35rem) !important;
+  line-height:1.02 !important;
+  letter-spacing:-0.03em !important;
+  max-width:680px; margin-left:auto; margin-right:auto;
+  filter:drop-shadow(0 4px 30px rgba(255,75,43,0.14));
+}
+
+/* refined live badge — soft outer glow ring */
+.status-badge{
+  box-shadow:0 0 0 1px rgba(77,218,122,0.10), 0 0 22px -6px rgba(77,218,122,0.45);
+  backdrop-filter:blur(4px);
+}
+
+/* thin animated accent line between sub-text and chips */
+.hero-sub{ position:relative; }
+.hero-sub::after{
+  content:''; display:block; width:54px; height:2px; margin:26px auto 0;
+  border-radius:2px;
+  background:linear-gradient(90deg, transparent, #FF4B2B, transparent);
+  background-size:200% auto;
+  animation:gradShift 4s linear infinite;
+}
+
+/* chips: lift + glow on hover */
+.chip{ transition:transform .18s ease, box-shadow .18s ease, border-color .18s ease; }
+.chip:hover{ transform:translateY(-2px); }
+.chip-a:hover{ box-shadow:0 6px 18px -8px rgba(77,168,218,0.6); }
+.chip-b:hover{ box-shadow:0 6px 18px -8px rgba(77,218,122,0.6); }
+.chip-c:hover{ box-shadow:0 6px 18px -8px rgba(218,138,77,0.6); }
+
+/* ✦ team wordmark above the title */
+.wordmark{
+  font-family:'Space Mono', monospace;
+  font-size:12px; letter-spacing:0.42em; font-weight:700;
+  color:#6a7290; text-transform:uppercase;
+  display:flex; align-items:center; justify-content:center; gap:10px;
+  margin-bottom:18px;
+  animation:fadeIn .9s ease .1s both;
+}
+.wordmark .wm-mark{ color:#FF4B2B; font-size:10px; letter-spacing:0; animation:blink 2.6s ease-in-out infinite; }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -363,6 +538,7 @@ st.markdown("""
     <div style="display:flex;justify-content:center;margin-bottom:28px">
       <span class="status-badge"><span class="status-dot"></span>Sandbox Active</span>
     </div>
+    <div class="wordmark"><span class="wm-mark">◆</span>QUIET&nbsp;DISASTERS</div>
     <div class="hero-title">Candidate <em>Ranking</em> System</div>
     <div class="hero-sub">
       Run the <code>rank.py</code> pipeline on precomputed artifacts

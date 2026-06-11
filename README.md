@@ -1,137 +1,184 @@
-# Redrob AI Candidate Ranking System — Team Quiet Disasters
+# Redrob AI Candidate Ranking System — Team *Quiet Disasters*
 
-**HuggingFace Sandbox (Live Demo):** [https://huggingface.co/spaces/Abhii2005/Quiet-Disasters-Ranker](https://huggingface.co/spaces/Abhii2005/Quiet-Disasters-Ranker)
+**Live Sandbox (HuggingFace Spaces):** https://huggingface.co/spaces/Abhii2005/Quiet-Disasters-Ranker
 
-This repository contains the full source code, dependencies, and execution instructions for our submission to the Redrob AI Candidate Ranking Hackathon.
+This repository contains the full source code, dependencies, precomputation scripts, and exact reproduction commands for our submission to the Redrob AI Candidate Ranking Hackathon.
 
-Our solution is a highly optimized, multi-stage retrieval and ranking pipeline designed specifically to meet the strict computational boundaries of the competition (CPU-only, no network, <5 minutes).
+Our solution ranks the top 100 candidates from a 100,000-candidate pool for the released Senior AI Engineer job description. It is a **multi-stage retrieval-and-ranking pipeline** built to satisfy the competition's hard constraints: **CPU-only, no network, ≤ 16 GB RAM, ≤ 5 minutes** for the ranking step.
 
-## 🚀 Execution & Reproduction (Stage 3 Compliance)
+We deliberately avoid the "one LLM call per candidate" approach. That cannot scale to a production pool inside the compute budget. Instead we combine dense vector retrieval, a local cross-encoder, and a transparent feature-scoring layer — each stage chosen for a specific latency-vs-quality tradeoff.
 
-As per the hackathon specification, our system uses a **two-phase architecture**: a GPU-accelerated precomputation step (to build embeddings and artifacts), and an ultra-fast CPU-only ranking step (to output the final CSV).
+---
 
-### 0. Dataset Assembly (For Testers)
+## 1. Architecture at a glance
 
-Because GitHub limits file sizes to 100MB, the 465MB `candidates.jsonl` dataset is split into 10 smaller chunks under `data_chunks/`. Before running the pipeline, you must merge them back into a single file.
+```
+candidates.jsonl ──(precompute.py, offline, one-time)──▶ artifacts/  (~770 MB)
+                                                              │
+                                                              ▼
+                                          rank.py  (CPU-only, offline, ~60s)
+                                                              │
+                                                              ▼
+                                                       submission.csv  (top 100)
+```
 
-> ⚠️ **IMPORTANT: Do not skip this step!**
-> If you clone the repo and immediately run `precompute.py`, it will crash with a **"File Not Found"** error because `candidates.jsonl` is ignored by Git. You MUST run the merge script below first.
+The system is **two-phase by design**, which the spec explicitly permits (Section 10.3: *"pre-computation may exceed the 5-minute window, but the ranking step that produces the CSV must complete within it"*):
+
+- **Phase A — Precompute (`precompute.py`):** runs once, offline, may use a GPU and downloads models from HuggingFace. Encodes all 100K candidates, builds the FAISS index, precomputes skill matches and honeypot flags, and saves the cross-encoder locally. Output: the `artifacts/` directory.
+- **Phase B — Rank (`rank.py`):** the scored submission step. Loads only the precomputed `artifacts/`, runs entirely on CPU with **no network**, and writes the final CSV in well under the 5-minute budget.
+
+Because the candidate embeddings and JD vectors are precomputed, the ranking step never re-encodes raw candidate text — it scores vectors. This is what keeps Phase B fast and CPU-only.
+
+---
+
+## 2. Reproduction (Stage 3)
+
+### Step 0 — Reconstruct the dataset
+
+GitHub caps single files at 100 MB, so the ~465 MB `candidates.jsonl` is committed as 10 line-aligned shards under `data_chunks/`. Reconstruct it first:
 
 ```bash
-# Merge ALL chunks → full 100K dataset
+# Merge ALL chunks -> full 100K dataset (candidates.jsonl)
 python merge_chunks.py
 
-# Alternatively, merge specific parts for partial/quick testing (e.g., 30K candidates)
+# Optional: merge only specific parts for quick partial testing (e.g. first 30K)
 # python merge_chunks.py --parts 1 2 3 --out candidates_30k.jsonl
 ```
-This will produce the `candidates.jsonl` file required for the pre-computation step.
 
-### 1. Pre-Computation Phase (Generates Artifacts)
-*Note: Pre-computation exceeds the 5-minute window and uses the network to download local models, but it is executed offline before the ranking step.*
+> **Do not skip this.** `candidates.jsonl` is git-ignored due to size. If you run `precompute.py` before merging, it will fail with a *file not found* error.
+
+### Step 1 — Precompute artifacts (one-time, offline)
 
 ```bash
-# Install dependencies
 pip install -r requirements.txt
 
-# Run the pre-computation script (takes ~5 minutes, GPU recommended)
 python precompute.py --candidates ./candidates.jsonl --out-dir ./artifacts/
 ```
-This script reads the raw `candidates.jsonl`, downloads the necessary Bi-Encoder and Cross-Encoder models from HuggingFace, computes semantic embeddings for all 100K candidates, builds the FAISS index, and saves everything to the local `./artifacts/` directory (~770 MB).
 
-### 2. The Ranking Phase (The Submission Step)
-The following single command executes the ranking phase end-to-end. It runs **entirely on CPU**, makes **no network calls**, and finishes in **under 50 seconds on 10 core cpu** (well within the 5-minute budget).
+This reads `candidates.jsonl`, downloads the bi-encoder (`all-MiniLM-L6-v2`) and cross-encoder (`cross-encoder/ms-marco-MiniLM-L-6-v2`), computes embeddings for all 100K candidates, builds the FAISS index, and **saves the cross-encoder into `artifacts/models/ce`** so the ranking step needs no network. Output: `./artifacts/` (~770 MB). Network is used here (model download) and this phase may exceed 5 minutes — both are allowed for precompute.
+
+### Step 2 — Rank (the single submission command)
 
 ```bash
 python rank.py --candidates ./candidates.jsonl --artifacts ./artifacts --out ./submission.csv
 ```
-This command reads the local `./artifacts/` and outputs the final `submission.csv` containing exactly 100 candidates with monotonically non-increasing scores, deterministic tie-breaks, and dynamic reasoning strings.
 
-### 3. Sandbox Sample Ranking (`rank_small.py`)
-**Live Demo:** [https://huggingface.co/spaces/Abhii2005/Quiet-Disasters-Ranker](https://huggingface.co/spaces/Abhii2005/Quiet-Disasters-Ranker)
+This is the **single command that produces the submission CSV** (Section 10.3). It runs **entirely on CPU**, makes **no network calls** (the cross-encoder loads from the local `artifacts/models/ce` path), and completes in **~60 seconds** on a 10-core CPU — well within the 5-minute budget. It outputs exactly 100 candidates with monotonically non-increasing scores, deterministic tie-breaks (equal scores ordered by `candidate_id` ascending), and per-candidate reasoning strings. The script self-validates header, row count, monotonicity, and tie-breaks before writing.
 
-To comply with the requirement that the HuggingFace sandbox must allow judges to upload a small sample (≤100 candidates) and rank *only* those candidates, we created **`rank_small.py`**.
+> Note: `rank.py` reads the precomputed `artifacts/` (representing all 100K candidates) rather than re-parsing the raw file; the `--candidates` flag is accepted for spec-command compatibility. This is what allows the ranking step to stay within the CPU/time budget.
+
+### Step 3 — Validate
 
 ```bash
-python rank_small.py --candidates ./sample.json --artifacts ./artifacts --out ./submission.csv
+python validate_submission.py submission.csv
+# expect: "Submission is valid."
 ```
-**Why this exists:** The primary `rank.py` script bypasses the 5-minute CPU limit by entirely ignoring the input `.jsonl` file and reading directly from the precomputed `artifacts/` folder (representing all 100K candidates). If a judge uploads 50 candidates, `rank.py` would ignore them and still rank the full 100K. 
-
-**How it works:** `rank_small.py` intercepts the execution, parses the exact Candidate IDs from the uploaded sample file, and strictly filters the 100K precomputed artifacts down to *only* the candidates present in the upload. It then runs the exact identical ML scoring pipeline (Stages 1, 2, and 3) on just that subset. It dynamically scales the output CSV (e.g. outputting 50 rows for a 50-candidate upload) rather than crashing on the strict 100-row validation. 
 
 ---
 
-## 🏗️ Architecture & Methodology
+## 3. Compute compliance (ranking step)
 
-Our system drops the heavy LLM-per-candidate approach in favor of a lightning-fast heuristic pipeline combined with dense vector retrieval.
-
-### Pipeline Overview
-
-1. **Stage 1: FAISS Retrieval (Top 100K → Top 500)**
-   - Addresses the cold-start problem using `faiss-cpu`.
-   - Combines dense semantic search (via `all-MiniLM-L6-v2`) with boolean skill filters and hard exclusions (e.g., removing explicitly non-technical titles).
-   - Generates a high-recall pool of 500 candidates.
-
-2. **Stage 2: Cross-Encoder Re-Ranking (Top 500)**
-   - Applies `cross-encoder/ms-marco-MiniLM-L-6-v2` locally on CPU.
-   - Extracts deep semantic relevance against the JD that the bi-encoder misses.
-
-3. **Stage 3: 7-Feature Heuristic Scoring**
-   Computes a final composite score based on:
-   - **Career Domain Evidence (32%)**: Cross-encoder + semantic cosine distance.
-   - **Retrieval/Search Expertise (26%)**: Boolean depth and coverage of vector DB and retrieval skills.
-   - **Production Deployment (15%)**: Semantic + keyword matching for scaling/shipping ML.
-   - **Vector DB Infrastructure (10%)**: Direct tool detection (Pinecone, Milvus, Weaviate).
-   - **Availability (10%)**: Capped behavioral signals (notice period, response rate).
-   - **LLM/Adjacent (4%)**: Nice-to-have skill matching.
-   - **Career Progression (3%)**: Title trajectory (Junior → Senior).
-
-4. **Multiplicative Penalties**
-   - **Keyword Stuffers (×0.20)**: Penalizes profiles with massive skill counts but 0 duration/endorsements.
-   - **Services Firms (×0.40)**: Penalizes candidates lacking product-company experience.
-   - **Experience Mismatch (×0.75)**: Penalizes candidates with 16+ years experience (too senior for the JD).
-
-5. **Stage 4: Dynamic Reasoning Generation**
-   - We abandoned static templates.
-   - Our script builds unique justification strings directly from the candidate's parsed attributes (company name, exact months of skill usage, endorsement counts).
-   - This prevents hallucination and guarantees variance.
+| Constraint | Limit | Our ranking step |
+| --- | --- | --- |
+| Runtime | ≤ 5 min | ~60 s |
+| Memory | ≤ 16 GB | within budget |
+| Compute | CPU only | CPU only (no GPU) |
+| Network | Off | Off — cross-encoder loaded from local `artifacts/models/ce` |
+| Disk | ≤ 5 GB intermediate | within budget |
 
 ---
 
-## 🛡️ Honeypot Detection
+## 4. Pipeline detail
 
-We implemented a strict, two-layer honeypot detection system to ensure no impossible profiles leak into the Top 100.
-- **Layer 1 (Precompute)**: Flags profiles claiming `expert` proficiency but zero duration.
-- **Layer 2 (Runtime)**: Catches ghost skills (0 endorsements + 0 duration but high JD match) and unrealistically broad coverage.
+### Stage 1 — Retrieval (100K → 500)
+Builds a high-recall candidate pool by taking the **union** of three signals, then trims to the top 500:
+- **Dense semantic search** via `all-MiniLM-L6-v2` embeddings + FAISS (top results from a 1000-vector search).
+- **Skill match pool** — candidates with the most JD must-have skill matches.
+- **Behavioral pool** — top candidates by availability signals.
 
-**Result:** 0% honeypot rate in the final submission.
+Non-technical titles and hard honeypots are excluded before scoring.
+
+### Stage 2 — Cross-encoder re-ranking (500)
+Runs `cross-encoder/ms-marco-MiniLM-L-6-v2` locally on CPU over the 500-candidate pool, scoring deep JD-relevance that the bi-encoder misses. Outputs are sigmoid-normalized.
+
+### Stage 3 — Seven-feature weighted scoring
+Each candidate's final score is a weighted blend of:
+
+| Feature | Weight | What it measures |
+| --- | --- | --- |
+| Career domain evidence | 0.32 | Cross-encoder + semantic relevance to the JD domain |
+| Retrieval / search expertise | 0.26 | Depth & coverage of retrieval / vector-DB skills |
+| Production deployment | 0.15 | Evidence of shipping/scaling ML in production |
+| Vector-DB infrastructure | 0.10 | Direct tool detection (Pinecone, Milvus, Weaviate, Qdrant, FAISS) |
+| Behavioral availability | 0.10 (capped at 0.80) | Notice period, recruiter response rate, recency |
+| LLM-adjacent experience | 0.04 | Nice-to-have skill coverage |
+| Career progression | 0.03 | Title trajectory (junior → senior) |
+
+Skill credibility is itself a weighted blend: `0.35·proficiency + 0.25·endorsements + 0.25·duration + 0.15·assessment`.
+
+### Multiplicative penalties
+- **Keyword-stuffer (×0.20):** many JD-matching skills but near-zero duration/endorsements.
+- **Services-firm (×0.40 / ×0.80):** candidates from services firms lacking product-company domain evidence (×0.40 when domain is weak, ×0.80 when partial).
+- **Honeypot soft penalties (×0.75 / ×0.50):** profiles with suspicious-but-not-conclusive impossibility signals.
+- **Availability cap (0.80):** prevents behavioral signals from overwhelming domain expertise.
+
+### Reasoning generation
+Reasoning strings are **built from each candidate's parsed attributes** (current title, company, exact skill durations in months, endorsement counts, assessment scores, availability) — not from templates and not from a generative model. This guarantees every claim corresponds to a real profile field (no hallucination) and that strings vary across candidates. The narrative is anchored on the **highest weighted-contribution** feature, and acknowledges concerns (e.g. long notice period) where present.
 
 ---
 
-## 📁 Repository Structure
+## 5. Honeypot handling
 
-*Note: The `artifacts/` folder and `candidates.jsonl` are not checked into version control due to size constraints. The `artifacts/` folder will be downloaded/generated via `precompute.py`.*
+The dataset seeds ~80 honeypot profiles (subtly impossible: e.g. 8 years at a 3-year-old company; "expert" in 10 skills with 0 months used) that are forced to ground-truth tier 0. Submissions with a honeypot rate > 10% in the top 100 are disqualified at Stage 3.
+
+We use an explicit two-layer detector:
+- **Layer 1 (precompute):** flags profiles claiming high proficiency with zero duration.
+- **Layer 2 (runtime):** catches ghost skills (0 endorsements + 0 duration yet high JD match) and implausibly broad coverage.
+
+Hard-flagged honeypots are excluded from the pool; borderline cases receive soft score penalties. Measured honeypot rate in our final top-100 submission: **0%**.
+
+---
+
+## 6. Sandbox / demo (Section 10.5)
+
+**Live:** https://huggingface.co/spaces/Abhii2005/Quiet-Disasters-Ranker
+
+A Streamlit app (`app.py`) wraps the pipeline for the small-sample reproducibility check. It offers two run modes:
+
+- **Run on Pre-loaded 100K Dataset** → executes `rank.py` against the precomputed artifacts and shows the ranked top-100 table, timing, and pipeline logs.
+- **Run on Uploaded Sample** → executes `rank_small.py`. This parses the candidate IDs from an uploaded sample (≤100 candidates) and filters the precomputed artifacts down to **only those candidates**, then runs the identical Stage 1–3 scoring on that subset and emits a correspondingly sized CSV (e.g. 50 rows for a 50-candidate upload). Note: this re-ranks candidates that exist in the precomputed pool; it is a reproducibility demo of the scoring logic, not live re-embedding of novel profiles.
+
+Per Section 10.5, the sandbox only needs to handle a small sample and complete within the CPU budget — full 100K reproduction is done from this repo at Stage 3.
+
+---
+
+## 7. Repository structure
 
 ```text
-├── README.md                    # Setup, commands, and architecture (this file)
-├── requirements.txt             # Pinned dependencies for precise reproduction
-├── submission_metadata.yaml     # Required metadata mirroring the portal submission
-├── precompute.py                # Full source code for artifact/embedding generation
-├── rank.py                      # Full source code for the CPU ranking pipeline
-├── rank_small.py                # Dynamic filter wrapper for Streamlit Sandbox uploaded samples
-├── validate_submission.py       # Helper script to verify CSV compliance
-├── app.py                       # Streamlit UI wrapper for HuggingFace Spaces Sandbox
+├── README.md                 # This file
+├── requirements.txt          # All dependencies with versions (see note below)
+├── submission_metadata.yaml  # Metadata mirroring the portal submission
+├── merge_chunks.py           # Reconstructs candidates.jsonl from data_chunks/
+├── data_chunks/              # 10 line-aligned shards of candidates.jsonl
+├── precompute.py             # Phase A: builds embeddings, FAISS index, artifacts
+├── rank.py                   # Phase B: CPU-only ranking step (produces submission.csv)
+├── rank_small.py             # Sandbox: ranks an uploaded sub-sample of the pool
+├── app.py                    # Streamlit UI for the HuggingFace Spaces sandbox
+├── validate_submission.py    # CSV format validator
+└── sample_candidates.json    # Small sample for local sandbox testing
 ```
 
-### Dependency Stack (`requirements.txt`)
-- `sentence-transformers>=2.2.0`
-- `numpy>=1.24.0`
-- `pandas>=1.5.0`
-- `faiss-cpu>=1.7.0`
-- `streamlit>=1.20.0` (for sandbox)
+> `candidates.jsonl` and `artifacts/` are **not** committed (size). Reconstruct the dataset with `merge_chunks.py` and generate artifacts with `precompute.py`.
 
-## 🧪 HuggingFace Spaces Sandbox
+### Core dependency stack
+`sentence-transformers`, `transformers`, `torch`, `faiss-cpu`, `numpy`, `pandas`, `pyarrow`, `streamlit` (sandbox only).
 
-As required by Section 10.5 of the spec, a working sandbox demonstrating our ranking system on a small sample can be accessed here:
-**[HuggingFace Spaces Sandbox](https://huggingface.co/spaces/Abhii2005/Quiet-Disasters-Ranker)**
+> Exact, pinned versions are in `requirements.txt`, generated from the working environment with `pip freeze` so the Stage-3 reproduction resolves the same versions used to build the artifacts.
 
-The sandbox executes the exact `rank.py` logic against the precomputed artifacts in a Streamlit container, proving that our CPU-only heuristic approach executes cleanly, deterministically, and rapidly.
+---
+
+## 8. Development & AI tooling
+
+This submission was built by Team Quiet Disasters with AI tools used as assisted-engineering aids inside the Antigravity IDE (primarily Claude Opus 4.8). The architecture, feature design, weighting, dataset/schema handling, and all validation were done by the team. LLM assistance was concentrated on two implementation areas — the batch-optimized FAISS retrieval logic and the edge-case logic for the two-layer honeypot detector — driven by our own written audits of the pipeline. Full per-tool declaration is in `submission_metadata.yaml`.
+
+No candidate data is sent to any hosted LLM during ranking; the ranking step runs fully offline on CPU.

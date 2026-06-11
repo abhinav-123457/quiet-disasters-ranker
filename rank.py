@@ -1241,7 +1241,7 @@ def main():
     global ARTIFACTS_DIR, OUTPUT_PATH
 
     parser = argparse.ArgumentParser(
-        description="Redrob AI Candidate Ranking System v15"
+        description="Redrob AI Candidate Ranking System"
     )
     parser.add_argument(
         "--candidates", type=str, default=None,

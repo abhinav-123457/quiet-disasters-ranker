@@ -4,28 +4,22 @@ primary_contact:
   name: "Abhinav Shakya"
   email: "abhinavshakya063@gmail.com"
   phone: "+91-8800680347"
-
 team_members:
   - name: "Abhinav Shakya"
     email: "abhinavshakya063@gmail.com"
     role: "ML Engineer"
-
   - name: "Dhruv Kumar"
     email: "dhruv258.kumar@gmail.com"
     role: "Data Engineer"
-
   - name: "Lakshya Saxena"
     email: "saxena.lakshya0106@gmail.com"
     role: "Search & Retrieval Engineer"
-    
   - name: "Himanshu Sharma"
     email: "himanshusharma5856@gmail.com"
     role: "Backend Engineer"
-
 github_repo: "https://github.com/abhinav-123457/quiet-disasters-ranker"
 sandbox_link: "https://huggingface.co/spaces/Abhii2005/Quiet-Disasters-Ranker"
 reproduce_command: "python rank.py --candidates ./candidates.jsonl --artifacts ./artifacts --out ./submission.csv"
-
 compute:
   platform: "Local Machine (Samsung Galaxy Book 3)"
   cpu_cores: 10
@@ -36,32 +30,39 @@ compute:
   has_network_during_ranking: false
   pre_computation_required: true
   pre_computation_time_minutes: 6
-
 ai_tools_used:
   - "Claude"
   - "ChatGPT"
-  - "Gemini"
-
 ai_usage_summary: |
   We used LLMs as assisted-engineering tools, driven by our own audits and design
   decisions, inside the Antigravity IDE (primarily Claude Opus 4.8).
-
   The architecture, feature design, weighting, dataset schema mapping, and all
   validation were done by the human team. We wrote detailed audits of our pipeline
   and fed those to the LLM to refine specific components.
-
   LLM assistance was concentrated on two implementation areas: the batch-optimized
   FAISS retrieval logic, and the edge-case logic for our two-layer honeypot
   detection. The remaining components — the 7-feature scoring model, the reasoning
   generator, the penalty system, and all calibration — were designed and written
   by the team, with the LLM used for code review and debugging.
-
   No candidate data was sent to any hosted LLM during ranking; the ranking step
   runs fully offline on CPU.
-
 methodology_summary: |
-  Our system uses a deterministic, multi-stage retrieval and ranking pipeline designed to execute completely offline on a CPU within 50 seconds. Stage 1 addresses the cold-start problem via a fast FAISS vector search combined with boolean skill filters, instantly reducing 100K candidates to a high-recall pool of 500. Stage 2 applies a lightweight, CPU-optimized Cross-Encoder to re-rank the top 500, extracting deep semantic relevance against the job description that bi-encoders miss. Stage 3 computes the final ranking using a 7-feature weighted heuristic model. We evaluate career domain evidence (32%), search/retrieval expertise (26%), and vector DB infrastructure (10%), alongside behavioral signals like notice periods. Crucially, we apply aggressive multiplicative penalties to weed out low-quality matches: generalized services firms receive a 0.4x penalty, keyword stuffers get 0.2x, and impossible 'honeypot' profiles are zeroed out via a strict two-layer runtime check. Finally, Stage 4 generates dynamic, non-templated reasoning strings grounded purely in the candidate's actual skill durations, endorsements, and career trajectory, ensuring transparent and hallucination-free justifications for every rank.
-
+  Our system uses a deterministic, multi-stage retrieval and ranking pipeline that
+  runs completely offline on CPU in about 60 seconds — well within the 5-minute
+  budget. Stage 1 addresses the cold-start problem with a fast FAISS vector search
+  combined with boolean skill filters, reducing 100K candidates to a high-recall
+  pool of 500. Stage 2 applies a lightweight, CPU-optimized cross-encoder to
+  re-rank those 500, extracting deep job-description relevance that bi-encoders
+  miss. Stage 3 computes the final ranking with a 7-feature weighted model:
+  career domain evidence (32%), search/retrieval expertise (26%), production
+  deployment (15%), vector-DB infrastructure (10%), behavioral availability (10%,
+  capped), LLM-adjacent experience (4%), and career progression (3%). We apply
+  multiplicative penalties to demote low-quality matches: services firms without
+  product-company evidence receive 0.4x–0.8x, keyword stuffers 0.2x, and impossible
+  "honeypot" profiles are caught by a strict two-layer detector. A final reasoning
+  step builds non-templated justifications grounded in each candidate's actual skill
+  durations, endorsements, and career trajectory, keeping every rank transparent and
+  avoiding hallucinated claims.
 declarations:
   read_submission_spec: true
   code_is_original_work: true

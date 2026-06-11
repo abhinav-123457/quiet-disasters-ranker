@@ -31,8 +31,9 @@ compute:
   pre_computation_required: true
   pre_computation_time_minutes: 6
 ai_tools_used:
-  - "Claude"
+  - "Claude (Opus 4.8)"
   - "ChatGPT"
+  
 ai_usage_summary: |
   We used LLMs as assisted-engineering tools, driven by our own audits and design
   decisions, inside the Antigravity IDE (primarily Claude Opus 4.8).

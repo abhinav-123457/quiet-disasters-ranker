@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-rank.py — Redrob AI Candidate Ranking System
-Runs on CPU, must complete in <300 seconds, no network calls.
-
-Usage:
-  python rank.py --candidates ./candidates.jsonl --artifacts ./artifacts --out ./submission.csv
+rank_small.py — Redrob AI Candidate Ranking System (small-sample / sandbox)
+Same pipeline as rank.py, but ranks only an uploaded sub-sample of candidates.
+CPU-only, no network calls.
 """
 
 import argparse
-
 import csv
 import logging
 import os
@@ -146,6 +143,51 @@ TITLE_LEVELS = {
     "founder": 5, "co-founder": 5, "cto": 6, "ceo": 6,
 }
 
+# --- JD-FIT VOCABULARIES (industry/career-based, from real candidate fields) ---
+
+SERVICES_INDUSTRIES = [
+    "it services", "consulting", "information technology and services",
+    "outsourcing", "staffing", "business process", "bpo", "system integrator",
+]
+PRODUCT_INDUSTRY_HINTS = [
+    "software", "internet", "saas", "product", "technology", "fintech",
+    "e-commerce", "ecommerce", "marketplace", "platform",
+    "artificial intelligence", "machine learning",
+]
+CV_SPEECH_ROBOTICS_KWS = [
+    "computer vision", "opencv", "image classification", "object detection",
+    "image segmentation", "face recognition", "ocr", "speech recognition",
+    "speech-to-text", "text-to-speech", "tts", "asr", "robotics",
+    "ros", "slam", "lidar", "autonomous", "point cloud",
+]
+NLP_IR_KWS = [
+    "nlp", "natural language", "information retrieval", "retrieval", "search",
+    "ranking", "recommendation", "embeddings", "transformers", "bert",
+    "semantic", "language model", "question answering",
+]
+RESEARCH_TITLE_KWS = [
+    "research scholar", "phd", "ph.d", "postdoc", "post-doc", "post doctoral",
+    "research assistant", "research associate", "research fellow", "professor",
+    "lecturer", "doctoral",
+]
+RESEARCH_INDUSTRY_KWS = ["research", "education", "higher education", "academic", "university"]
+PRODUCTION_EVIDENCE_KWS = [
+    "production", "deployed", "shipped", "launched", "live", "real users",
+    "real-time", "serving", "scale", "api", "microservice", "endpoint",
+]
+FRAMEWORK_KWS = ["langchain", "llamaindex", "auto-gpt", "autogpt"]
+LLM_API_KWS = ["openai api", "gpt-3", "gpt-4", "chatgpt api", "prompt engineering"]
+CLASSIC_ML_KWS = [
+    "machine learning", "deep learning", "pytorch", "tensorflow", "scikit",
+    "xgboost", "recommendation", "ranking", "information retrieval",
+    "computer vision", "nlp", "data science",
+]
+TIER1_CITIES = [
+    "bangalore", "bengaluru", "hyderabad", "pune", "mumbai", "delhi",
+    "noida", "gurgaon", "gurugram", "ncr", "chennai",
+]
+ENABLE_FRAMEWORK_ONLY_PENALTY = True  # riskiest signal — flip to False to disable
+
 
 # ============================================================================
 # 2. LOAD ARTIFACTS + SETUP
@@ -166,31 +208,24 @@ def load_artifacts():
     skill_lookup = pickle.load(open(os.path.join(art, "skill_matches.pkl"), "rb"))
     honeypot_data = pickle.load(open(os.path.join(art, "honeypot_flags.pkl"), "rb"))
 
-    # Ordering assertion
     saved_order = np.load(os.path.join(art, "candidate_order.npy"), allow_pickle=True)
     assert len(cand_embeds_f16) == len(meta_df), "Embedding/metadata count mismatch"
     assert np.array_equal(saved_order, meta_df["candidate_id"].values), \
         "Embedding/metadata ordering mismatch!"
 
-    # Cast float32 ONCE
     cand_embeds = cand_embeds_f16.astype(np.float32)
-
-    # Map archetype max: cosine [-1,1] → [0,1]
     archetype_max = (archetype_max_raw.astype(np.float32) + 1.0) / 2.0
 
-    # Vectorized semantic: (100K, 5) — all cosine scores at once
     all_semantic_raw = cand_embeds @ jd_queries.T
-    all_semantic = (all_semantic_raw + 1.0) / 2.0      # map to [0,1]
-    all_semantic_max = all_semantic.max(axis=1)          # best of 5 queries
+    all_semantic = (all_semantic_raw + 1.0) / 2.0
+    all_semantic_max = all_semantic.max(axis=1)
 
-    # Skill threshold (calibrated during precompute)
     try:
         skill_threshold = float(np.load(os.path.join(art, "skill_threshold.npy"))[0])
     except FileNotFoundError:
         skill_threshold = 0.50
         log.warning("No calibrated threshold found, using default 0.50")
 
-    # FAISS
     use_faiss = False
     faiss_index = None
     try:
@@ -201,15 +236,12 @@ def load_artifacts():
     except (ImportError, Exception) as e:
         log.warning(f"FAISS not available ({e}), using numpy fallback")
 
-    # O(1) lookups
     cid_to_idx = {cid: i for i, cid in enumerate(meta_df["candidate_id"])}
 
-    # Pre-materialize columns as numpy arrays
     titles_arr = meta_df["current_title"].values
     years_arr = meta_df["years_of_experience"].values
     cids_arr = meta_df["candidate_id"].values
 
-    # Pre-compute TODAY timestamp
     today = pd.Timestamp.now()
 
     log.info(f"Artifacts loaded in {time.time()-t0:.1f}s")
@@ -244,7 +276,6 @@ def load_artifacts():
 # ============================================================================
 
 def is_non_technical(title):
-    """Hard exclude non-technical titles. Returns True if should exclude."""
     t = title.lower()
     is_non_tech = any(kw in t for kw in NON_TECH_TITLES)
     has_tech = any(kw in t for kw in TECH_CARVEOUTS)
@@ -252,24 +283,15 @@ def is_non_technical(title):
 
 
 def is_honeypot(cid, ctx):
-    """O(1) lookup — hard exclude for suspicion >= 3."""
     return cid in ctx["honeypot_hard"]
 
 
 def runtime_honeypot_check(cid, ctx):
-    """
-    Runtime honeypot detection — catches profiles missed by precompute.
-    Spec: '~80 honeypots with subtly impossible profiles, e.g. expert
-    proficiency in 10 skills with 0 years used.'
-    Returns: 0.0 (hard exclude), 0.50 (soft penalty), or 1.0 (clean).
-    """
     skills = ctx["skill_lookup"].get(cid, [])
     if len(skills) < 5:
-        return 1.0  # not enough data to judge
+        return 1.0
 
     suspicion = 0
-
-    # Check 1: Advanced/expert proficiency with zero duration
     adv_zero = sum(1 for s in skills
                    if s["proficiency"] in ("advanced", "expert")
                    and s["duration_months"] == 0)
@@ -278,7 +300,6 @@ def runtime_honeypot_check(cid, ctx):
     elif adv_zero >= 3:
         suspicion += 1
 
-    # Check 2: Many high JD-matching skills with zero endorsements AND zero duration
     ghost_skills = sum(1 for s in skills
                        if s["best_jd_match_score"] > ctx["skill_threshold"]
                        and s["endorsements"] == 0
@@ -288,32 +309,28 @@ def runtime_honeypot_check(cid, ctx):
     elif ghost_skills >= 4:
         suspicion += 1
 
-    # Check 3: Unrealistically broad skill coverage (matches 12+ JD requirements)
     high_match = sum(1 for s in skills if s["best_jd_match_score"] > 0.60)
     if high_match >= 15:
         suspicion += 1
 
-    # Check 4: Many skills overall with uniformly zero duration
     zero_dur = sum(1 for s in skills if s["duration_months"] == 0)
     if zero_dur >= 10 and zero_dur / len(skills) > 0.7:
         suspicion += 1
 
     if suspicion >= 3:
-        return 0.0   # hard exclude
+        return 0.0
     elif suspicion >= 2:
-        return 0.50   # soft penalty
+        return 0.50
     return 1.0
 
 
 def honeypot_penalty(cid, ctx):
-    """Soft penalty for suspicion == 2. Returns multiplier."""
     if cid in ctx["honeypot_soft"]:
         return 0.50
     return 1.0
 
 
 def classify_title(title):
-    """Returns 1.0 (Tier A), 0.6 (B), 0.3 (C), 0.05 (other)."""
     t = title.lower()
     if any(k in t for k in TIER_A_TITLES):
         return 1.0
@@ -325,7 +342,7 @@ def classify_title(title):
 
 
 def score_experience(years):
-    """Score experience band. JD sweet spot: 5-9 years."""
+    """Score experience band [0,1]. JD sweet spot: 5-9 years. (Stage-1 scoring)"""
     if 5.0 <= years <= 9.0:
         return 1.0
     if 4.0 <= years < 5.0 or 9.0 < years <= 12.0:
@@ -336,7 +353,6 @@ def score_experience(years):
 
 
 def compute_domain_keyword_score(career_text_lower):
-    """Score domain-specific keyword matches. Returns [0, 1]."""
     score = 0.0
     for kw in STRONG_KEYWORDS:
         if kw in career_text_lower:
@@ -348,7 +364,6 @@ def compute_domain_keyword_score(career_text_lower):
 
 
 def compute_recency_score_single(last_active, today):
-    """Single candidate recency. Returns [0, 1]."""
     try:
         days = (today - pd.to_datetime(last_active)).days
     except Exception:
@@ -365,7 +380,6 @@ def compute_recency_score_single(last_active, today):
 
 
 def compute_recency_scores(last_active_series, today):
-    """Vectorized recency scoring for entire DataFrame column."""
     dates = pd.to_datetime(last_active_series, errors="coerce")
     days = (today - dates).dt.days.fillna(365)
     scores = pd.Series(0.1, index=days.index)
@@ -377,7 +391,6 @@ def compute_recency_scores(last_active_series, today):
 
 
 def compute_quick_behavioral(meta_df, today):
-    """Vectorized quick behavioral score for Stage 1 retrieval."""
     recency = compute_recency_scores(meta_df["last_active_date"], today)
     response = meta_df["recruiter_response_rate"].clip(0, 1).fillna(0.5)
     otw = meta_df["open_to_work"].astype(float).fillna(0.5)
@@ -385,14 +398,12 @@ def compute_quick_behavioral(meta_df, today):
 
 
 def safe_val(val, default=0.5):
-    """Safe value extraction — missing/NaN → default."""
     if val is None or (isinstance(val, float) and np.isnan(val)):
         return default
     return val
 
 
 def endorse_weight(e):
-    """Endorsement count → credibility weight."""
     if e == 0:
         return 0.40
     if e <= 5:
@@ -403,7 +414,6 @@ def endorse_weight(e):
 
 
 def duration_weight(d):
-    """Skill duration (months) → credibility weight."""
     if d == 0:
         return 0.20
     if d <= 6:
@@ -414,10 +424,6 @@ def duration_weight(d):
 
 
 def compute_credibility(skill, cid, ctx):
-    """
-    Weighted average credibility. NOT multiplicative.
-    Minimum realistic output: ~0.33. Maximum: 1.0.
-    """
     prof = PROF_WEIGHTS.get(skill["proficiency"], 0.60)
     endorse = endorse_weight(skill["endorsements"])
     dur = duration_weight(skill["duration_months"])
@@ -436,11 +442,6 @@ def compute_credibility(skill, cid, ctx):
 # --- PENALTIES ---
 
 def services_penalty(cid, f1_score, ctx):
-    """
-    JD: 'only worked at consulting firms — will not move forward.'
-    - All services + low domain (f1 < 0.30): ×0.40
-    - All services + some domain (f1 >= 0.30): ×0.80
-    """
     companies = ctx["nested"].get(cid, {}).get("career_companies", [])
     non_empty = [co for co in companies if co and co.strip()]
     if not non_empty:
@@ -456,12 +457,8 @@ def services_penalty(cid, f1_score, ctx):
 
 
 def stuffer_check(cid, idx, ctx):
-    """
-    ×0.20 for non-tech-adjacent titles with many JD-matching skills
-    but low average credibility. Catches keyword stuffers.
-    """
     title_tier = classify_title(str(ctx["titles_arr"][idx]))
-    if title_tier > 0.3:  # Tier A or B — unlikely stuffer
+    if title_tier > 0.3:
         return 1.0
 
     skills = ctx["skill_lookup"].get(cid, [])
@@ -476,10 +473,120 @@ def stuffer_check(cid, idx, ctx):
     return 1.0
 
 
+# --- JD-FIT PENALTIES (new; from real candidate fields) ---
+
+def tenure_stability_penalty(career_history):
+    """JD anti 'title-chaser switching companies every ~1.5 yrs'. [0.90, 1.0]."""
+    completed = [r for r in career_history if not r.get("is_current")]
+    durations = [r.get("duration_months", 0) or 0 for r in completed]
+    durations = [d for d in durations if d > 0]
+    if len(durations) < 4:
+        return 1.0
+    mean_tenure = sum(durations) / len(durations)
+    ordered = sorted(career_history, key=lambda r: r.get("start_date") or "")
+    levels = [get_title_level(r.get("title", "")) for r in ordered]
+    rising = bool(levels) and levels[-1] > levels[0]
+    if mean_tenure < 18 and rising:
+        return 0.90
+    if mean_tenure < 14:
+        return 0.93
+    return 1.0
+
+
+def services_industry_penalty(career_history):
+    """Strengthen services detection via industry. [0.85, 1.0]."""
+    inds = [(r.get("industry", "") or "").lower() for r in career_history]
+    inds = [i for i in inds if i]
+    if not inds:
+        return 1.0
+    if all(any(s in i for s in SERVICES_INDUSTRIES) for i in inds):
+        return 0.85
+    return 1.0
+
+
+def product_company_evidence(career_history):
+    """Positive: real tenure at a product company. Additive lift [0.0, 0.10]."""
+    months = 0
+    for r in career_history:
+        ind = (r.get("industry", "") or "").lower()
+        if not ind:
+            continue
+        if any(p in ind for p in PRODUCT_INDUSTRY_HINTS) and not any(s in ind for s in SERVICES_INDUSTRIES):
+            months += r.get("duration_months", 0) or 0
+    if months >= 36:
+        return 0.10
+    if months >= 18:
+        return 0.06
+    if months >= 6:
+        return 0.03
+    return 0.0
+
+
+def cv_speech_robotics_penalty(skill_names, career_text):
+    """JD: CV/speech/robotics WITHOUT NLP/IR -> not a fit. [0.85, 1.0]."""
+    blob = (" ".join(skill_names) + " " + (career_text or "")).lower()
+    cv = sum(1 for k in CV_SPEECH_ROBOTICS_KWS if k in blob)
+    nlp = sum(1 for k in NLP_IR_KWS if k in blob)
+    if cv >= 3 and nlp == 0:
+        return 0.85
+    if cv >= 2 and nlp == 0:
+        return 0.92
+    return 1.0
+
+
+def research_only_penalty(career_history, career_text):
+    """JD explicit reject: pure research without production. [0.70, 1.0]."""
+    ct = (career_text or "").lower()
+    has_production = any(k in ct for k in PRODUCTION_EVIDENCE_KWS)
+    research_roles = sum(
+        1 for r in career_history
+        if any(k in (r.get("title", "") or "").lower() for k in RESEARCH_TITLE_KWS)
+        or any(k in (r.get("industry", "") or "").lower() for k in RESEARCH_INDUSTRY_KWS)
+    )
+    if not research_roles:
+        return 1.0
+    n = max(len(career_history), 1)
+    if not has_production and research_roles / n >= 0.5:
+        return 0.70
+    if not has_production:
+        return 0.88
+    return 1.0
+
+
+def framework_only_penalty(skill_names, career_text):
+    """JD: recent LangChain->OpenAI only, no pre-LLM ML. Gated. [0.92, 1.0]."""
+    if not ENABLE_FRAMEWORK_ONLY_PENALTY:
+        return 1.0
+    blob = (" ".join(skill_names) + " " + (career_text or "")).lower()
+    framework = any(k in blob for k in FRAMEWORK_KWS) or any(k in blob for k in LLM_API_KWS)
+    classic = sum(1 for k in CLASSIC_ML_KWS if k in blob)
+    if framework and classic <= 1:
+        return 0.92
+    return 1.0
+
+
+def location_in_scope(country, location, willing):
+    """JD: India/Tier-1 preferred, relocation welcome. True => no concern/penalty."""
+    if "india" in (country or "").lower():
+        return True
+    loc = (location or "").lower()
+    if any(c in loc for c in TIER1_CITIES):
+        return True
+    return bool(willing)
+
+
+def location_penalty(idx, ctx):
+    """Mild down-weight for outside-India + not-open-to-relocate (JD: no visa sponsorship)."""
+    row = ctx["meta_df"].iloc[idx]
+    country = str(row.get("country", "") or "")
+    location = str(row.get("location", "") or "")
+    willing = bool(safe_val(row.get("willing_to_relocate", False), False))
+    return 1.0 if location_in_scope(country, location, willing) else 0.85
+
+
 # --- CROSS-ENCODER TEXT BUILDER ---
 
 def select_relevant_roles(career_history, n=3):
-    """Pick n roles most relevant to retrieval/ranking domain."""
     if len(career_history) <= n:
         return career_history
 
@@ -500,7 +607,6 @@ def select_relevant_roles(career_history, n=3):
 
 
 def build_ce_text(cid, idx, ctx):
-    """Build candidate text for cross-encoder input (~375 tokens)."""
     data = ctx["nested"].get(cid, {})
     parts = []
 
@@ -527,11 +633,9 @@ def build_ce_text(cid, idx, ctx):
 # ============================================================================
 
 def stage_1(ctx):
-    """Retrieve candidates, hard-exclude, score, return top-N."""
     log.info("=== STAGE 1: Retrieval ===")
     t0 = time.time()
 
-    # --- Semantic pool (FAISS or numpy) ---
     semantic_pool = set()
     if ctx["use_faiss"]:
         import faiss
@@ -547,7 +651,6 @@ def stage_1(ctx):
             semantic_pool.update(top_k_idx.tolist())
         log.info(f"Numpy semantic pool: {len(semantic_pool)}")
 
-    # --- Skill-match pool ---
     skill_threshold = ctx["skill_threshold"]
     must_have_counts = np.zeros(len(ctx["meta_df"]))
     for i, cid in enumerate(ctx["meta_df"]["candidate_id"]):
@@ -558,14 +661,13 @@ def stage_1(ctx):
     skill_top500 = set(np.argpartition(must_have_counts, -500)[-500:].tolist())
     log.info(f"Skill pool: {len(skill_top500)}")
 
-    # --- Behavioral pool ---
     behavioral_arr = compute_quick_behavioral(ctx["meta_df"], ctx["today"]).values
     behav_top200 = set(np.argpartition(behavioral_arr, -200)[-200:].tolist())
 
-    # --- UNION ---
     candidate_pool = semantic_pool | skill_top500 | behav_top200
     log.info(f"Union pool: {len(candidate_pool)}")
 
+    # --- SMALL-SAMPLE FILTER: restrict to uploaded candidate IDs ---
     global UPLOADED_CIDS
     if UPLOADED_CIDS:
         uploaded_indices = set()
@@ -575,7 +677,6 @@ def stage_1(ctx):
         candidate_pool = uploaded_indices
         log.info(f"Filtered pool to {len(candidate_pool)} uploaded candidates")
 
-    # --- HARD EXCLUSIONS ---
     excluded_honeypots_pre = 0
     excluded_honeypots_rt = 0
     excluded_titles = 0
@@ -586,12 +687,10 @@ def stage_1(ctx):
         cid = ctx["cids_arr"][idx]
         title = str(ctx["titles_arr"][idx])
 
-        # Precompute honeypot check
         if is_honeypot(cid, ctx):
             excluded_honeypots_pre += 1
             continue
 
-        # Runtime honeypot check (catches what precompute missed)
         hp_mult = runtime_honeypot_check(cid, ctx)
         if hp_mult == 0.0:
             excluded_honeypots_rt += 1
@@ -611,7 +710,6 @@ def stage_1(ctx):
              f"{soft_penalized} soft-penalized. "
              f"Remaining: {len(filtered_pool)}")
 
-    # --- Stage 1 scoring ---
     def stage1_score(idx):
         cid = ctx["cids_arr"][idx]
 
@@ -662,7 +760,6 @@ def stage_1(ctx):
 # ============================================================================
 
 def stage_2(top_n, ctx):
-    """Run cross-encoder on top-N candidates. Returns sigmoid scores."""
     log.info(f"=== STAGE 2: Cross-Encoder ({len(top_n)} pairs) ===")
     t0 = time.time()
 
@@ -673,16 +770,13 @@ def stage_2(top_n, ctx):
     )
     log.info(f"Cross-encoder loaded in {time.time()-t0:.1f}s")
 
-    # Build pairs
     pairs = [(JD_CORE, build_ce_text(cid, idx, ctx))
              for idx, cid, _ in top_n]
 
-    # Predict
     t1 = time.time()
     raw_logits = ce_model.predict(pairs, batch_size=32)
     log.info(f"Cross-encoder prediction: {time.time()-t1:.1f}s")
 
-    # Sigmoid normalization
     cross_scores = 1.0 / (1.0 + np.exp(-raw_logits))
 
     log.info(f"Stage 2 complete in {time.time()-t0:.1f}s")
@@ -696,30 +790,19 @@ def stage_2(top_n, ctx):
 # ============================================================================
 
 def feature_1(idx, cid, cross_sigmoid, ctx):
-    """Career Domain Evidence (weight: 0.32)"""
-    # Sub-A: Cross-encoder sigmoid (already [0,1])
-
-    # Sub-B: Archetype max (precomputed, already [0,1])
     arch = float(ctx["archetype_max"][idx])
-
-    # Sub-C: 0.25 keyword + 0.75 semantic (domain-specific query 0 only)
     career_text = ctx["nested"].get(cid, {}).get("career_text", "").lower()
     kw = compute_domain_keyword_score(career_text)
     cos_raw = float(ctx["cand_embeds"][idx] @ ctx["jd_queries"][0])
     sem = (cos_raw + 1.0) / 2.0
-
     domain = 0.25 * kw + 0.75 * sem
-
     result = 0.40 * cross_sigmoid + 0.30 * arch + 0.30 * domain
     return max(min(result, 1.0), 0.0)
 
 
 def feature_2(cid, ctx):
-    """Retrieval/Search Expertise (weight: 0.26)"""
     skills = ctx["skill_lookup"].get(cid, [])
     threshold = ctx["skill_threshold"]
-
-    # DEDUP by JD requirement index — keep highest credible score
     seen_jd_reqs = {}
     for s in skills:
         if s["best_jd_match_score"] < threshold:
@@ -733,14 +816,9 @@ def feature_2(cid, ctx):
     must_hits = sorted([v for k, v in seen_jd_reqs.items() if k < 10], reverse=True)
     nice_hits = sorted([v for k, v in seen_jd_reqs.items() if k >= 10], reverse=True)
 
-    # DEPTH: top-5 must-have scores, divisor = max(count, 3)
     top_must = must_hits[:5]
     depth = min(sum(top_must) / max(len(top_must), 3), 1.0) if top_must else 0.0
-
-    # COVERAGE: unique JD must-have requirements matched
     coverage = min(len(must_hits) / 6, 1.0)
-
-    # NICE-TO-HAVE: top-3, divisor = max(count, 2)
     top_nice = nice_hits[:3]
     nice_score = min(sum(top_nice) / max(len(top_nice), 2), 1.0) if top_nice else 0.0
 
@@ -750,9 +828,7 @@ def feature_2(cid, ctx):
 
 
 def feature_3(cid, idx, ctx):
-    """Production Deployment (weight: 0.15)"""
     ct = ctx["nested"].get(cid, {}).get("career_text", "").lower()
-
     kw_score = 0.0
     for k in DEPLOYMENT_KEYWORDS:
         if k in ct:
@@ -770,27 +846,21 @@ def feature_3(cid, idx, ctx):
 
     cos_raw = float(ctx["cand_embeds"][idx] @ ctx["jd_queries"][2])
     sem = (cos_raw + 1.0) / 2.0
-
     result = 0.40 * kw_score + 0.60 * sem
     return max(min(result, 1.0), 0.0)
 
 
 def feature_4(cid, idx, ctx):
-    """Vector DB & Infrastructure (weight: 0.10)"""
     skills = ctx["skill_lookup"].get(cid, [])
     career_text = ctx["nested"].get(cid, {}).get("career_text", "").lower()
-    threshold = ctx["skill_threshold"]
 
-    # TOOL-BASED COMPONENT
     tools_found = {}
     for s in skills:
         name_lower = s.get("norm_name", s["skill_name"].lower())
-
         is_tool = (name_lower in VECTOR_TOOLS or
                    s["best_jd_req_idx"] in VECTOR_SEARCH_JD_INDICES)
         if not is_tool:
             continue
-
         cred = compute_credibility(s, cid, ctx)
         in_desc = name_lower in career_text
         weight = 1.0 if in_desc else 0.6
@@ -803,18 +873,14 @@ def feature_4(cid, idx, ctx):
     base = {0: 0.0, 1: 0.4, 2: 0.7}.get(n, 1.0)
     tool_score = min(base * avg_cred, 1.0)
 
-    # SEMANTIC COMPONENT — JD query 1: "embeddings vector database..."
     cos_raw = float(ctx["cand_embeds"][idx] @ ctx["jd_queries"][1])
     sem_infra = (cos_raw + 1.0) / 2.0
-
     result = 0.60 * tool_score + 0.40 * sem_infra
     return max(min(result, 1.0), 0.0)
 
 
 def feature_5(idx, ctx):
-    """Availability & Behavioral (weight: 0.10, capped 0.80)"""
     row = ctx["meta_df"].iloc[idx]
-
     recency = compute_recency_score_single(row["last_active_date"], ctx["today"])
 
     rr = safe_val(row["recruiter_response_rate"], 0.5)
@@ -851,11 +917,10 @@ def feature_5(idx, ctx):
         0.10 * interview + 0.08 * otw + 0.08 * github +
         0.05 * trust + 0.08 * notice + 0.04 * pc + 0.03 * sr
     )
-    return min(result, 0.80)  # CAPPED
+    return min(result, 0.80)
 
 
 def feature_6(cid, ctx):
-    """LLM & Adjacent (weight: 0.04)"""
     skills = ctx["skill_lookup"].get(cid, [])
     threshold = ctx["skill_threshold"]
     VALUED = {10, 11, 12}
@@ -882,10 +947,9 @@ def get_title_level(title):
 
 
 def feature_7(cid, ctx):
-    """Career Progression (weight: 0.03)"""
     career = ctx["nested"].get(cid, {}).get("career_history", [])
     if len(career) < 2:
-        return 0.5  # neutral
+        return 0.5
 
     career_sorted = sorted(career, key=lambda r: r.get("start_date", ""))
     levels = [get_title_level(r.get("title", "")) for r in career_sorted]
@@ -903,20 +967,18 @@ def feature_7(cid, ctx):
 
 
 def experience_penalty(years):
-    """Multiplicative penalty for experience far outside 5-9yr sweet spot.
-    Stage 1 only uses 0.07 weight which is too weak — 16yr candidates
-    still appear in top 30. This adds a meaningful multiplier."""
+    """Multiplicative penalty outside the 5-9yr sweet spot (JD: range, not a hard rule)."""
     if 5.0 <= years <= 9.0:
         return 1.0
     if 4.0 <= years < 5.0 or 9.0 < years <= 12.0:
         return 0.95
     if 3.0 <= years < 4.0 or 12.0 < years <= 15.0:
-        return 0.85
-    return 0.75  # <3 or 16+ years
+        return 0.83
+    return 0.68  # <3 or >15 years
 
 
 def compute_final_score(idx, cid, cross_sigmoid, ctx):
-    """Compute final weighted score with penalties."""
+    """Final weighted score with penalties (incl. JD-fit logic)."""
     f1 = feature_1(idx, cid, cross_sigmoid, ctx)
     f2 = feature_2(cid, ctx)
     f3 = feature_3(cid, idx, ctx)
@@ -925,29 +987,35 @@ def compute_final_score(idx, cid, cross_sigmoid, ctx):
     f6 = feature_6(cid, ctx)
     f7 = feature_7(cid, ctx)
 
-    raw = (
-        0.32 * f1 +    # career domain evidence
-        0.26 * f2 +    # retrieval expertise
-        0.15 * f3 +    # production deployment
-        0.10 * f4 +    # vector DB
-        0.10 * f5 +    # availability (capped 0.80)
-        0.04 * f6 +    # LLM adjacent
-        0.03 * f7      # career progression
-    )
-    # Weights sum to 1.00
+    data = ctx["nested"].get(cid, {})
+    career_history = data.get("career_history", [])
+    career_text = data.get("career_text", "")
+    skill_names = data.get("skill_names", [])
 
-    # MULTIPLICATIVE PENALTIES
+    f1 = min(f1 + product_company_evidence(career_history), 1.0)
+
+    raw = (
+        0.32 * f1 + 0.26 * f2 + 0.15 * f3 + 0.10 * f4 +
+        0.10 * f5 + 0.04 * f6 + 0.03 * f7
+    )
+
     raw *= services_penalty(cid, f1, ctx)
     raw *= stuffer_check(cid, idx, ctx)
     raw *= honeypot_penalty(cid, ctx)
-    raw *= runtime_honeypot_check(cid, ctx)  # catches precompute misses
+    raw *= runtime_honeypot_check(cid, ctx)
     raw *= experience_penalty(float(ctx["years_arr"][idx]))
+
+    raw *= location_penalty(idx, ctx)
+    raw *= tenure_stability_penalty(career_history)
+    raw *= services_industry_penalty(career_history)
+    raw *= cv_speech_robotics_penalty(skill_names, career_text)
+    raw *= research_only_penalty(career_history, career_text)
+    raw *= framework_only_penalty(skill_names, career_text)
 
     return raw, [f1, f2, f3, f4, f5, f6, f7]
 
 
 def stage_3(top_n, cross_scores, ctx):
-    """Score top-N with 7 features, return top 100."""
     log.info(f"=== STAGE 3: Feature Scoring ({len(top_n)} candidates) ===")
     t0 = time.time()
 
@@ -957,7 +1025,6 @@ def stage_3(top_n, cross_scores, ctx):
                                                cross_scores[rank_in_n], ctx)
         final_scores.append((idx, cid, score, features))
 
-    # Sort by score descending, then by candidate_id ascending (tie-break)
     final_scores.sort(key=lambda x: (-x[2], x[1]))
     top_100 = final_scores[:100]
 
@@ -969,225 +1036,227 @@ def stage_3(top_n, cross_scores, ctx):
 
 
 # ============================================================================
-# 7. REASONING GENERATION
+# 7. REASONING GENERATION (natural language, varied, no internal scores)
 # ============================================================================
 
-def _build_skill_detail(skill, cid, ctx):
-    """Build a unique detail string for one skill, e.g. 'Elasticsearch (47 endorsements, 44mo)'."""
-    name = skill["skill_name"]
-    parts = []
-    e = skill["endorsements"]
-    d = skill["duration_months"]
+_FEATURE_WEIGHTS = [0.32, 0.26, 0.15, 0.10, 0.10, 0.04, 0.03]
+
+
+def _reason_seed(cid):
+    try:
+        return int(str(cid).rsplit("_", 1)[-1])
+    except Exception:
+        return sum(map(ord, str(cid)))
+
+
+def _article(word):
+    return "an" if word[:1].lower() in "aeiou" else "a"
+
+
+def _is_cv_speech(name):
+    n = name.lower()
+    return any(k in n for k in CV_SPEECH_ROBOTICS_KWS)
+
+
+def _skill_phrase(s, cap_years=None):
+    name = s["skill_name"]
+    d = s.get("duration_months", 0) or 0
+    e = s.get("endorsements", 0) or 0
+    bits = []
+    if d >= 12:
+        yv = d / 12.0
+        if cap_years:
+            yv = min(yv, float(cap_years))
+        yv = int(yv)
+        if yv >= 1:
+            bits.append(f"~{yv} yr" + ("s" if yv > 1 else ""))
+        else:
+            bits.append(f"{d} mo")
+    elif d > 0:
+        bits.append(f"{d} mo")
     if e > 0:
-        parts.append(f"{e} endorsements")
-    if d > 0:
-        parts.append(f"{d}mo")
-    # Assessment score if available
-    assessments = ctx["nested"].get(cid, {}).get("skill_assessment_scores", {})
-    asc = assessments.get(name)
-    if asc is not None and asc > 0:
-        parts.append(f"{int(asc)}% assessment")
-    if parts:
-        return f"{name} ({', '.join(parts)})"
-    return name
+        bits.append(f"{e} endorsements")
+    return f"{name} ({', '.join(bits)})" if bits else name
 
 
-def _get_top_skills_detailed(cid, ctx, req_filter=None, n=3):
-    """Get top-N credible skills with detail strings. Always unique per candidate."""
+def _top_skills(cid, ctx, must_only=True, n=2, exclude_cv_speech=False):
     skills = ctx["skill_lookup"].get(cid, [])
+    th = ctx["skill_threshold"]
     scored = []
     for s in skills:
-        if s["best_jd_match_score"] < ctx["skill_threshold"]:
+        if s["best_jd_match_score"] < th:
             continue
-        if req_filter is not None and s["best_jd_req_idx"] not in req_filter:
+        if must_only and s["best_jd_req_idx"] >= 10:
             continue
-        cred = compute_credibility(s, cid, ctx)
-        scored.append((cred * s["best_jd_match_score"], s))
+        if (not must_only) and s["best_jd_req_idx"] < 10:
+            continue
+        if exclude_cv_speech and _is_cv_speech(s["skill_name"]):
+            continue
+        score = s["best_jd_match_score"] * compute_credibility(s, cid, ctx)
+        if _is_cv_speech(s["skill_name"]):
+            score *= 0.3
+        scored.append((score, s))
     scored.sort(key=lambda x: x[0], reverse=True)
-    return [_build_skill_detail(s, cid, ctx) for _, s in scored[:n]]
+    return [s for _, s in scored[:n]]
 
 
-def _get_domain_keywords_found(career_text):
-    """Return which domain keywords appear in career text."""
-    found = []
-    for kw in STRONG_KEYWORDS:
-        if kw in career_text:
-            found.append(kw)
-            if len(found) >= 2:
-                break
-    return found
-
-
-def _strength_sentence(feat_idx, cid, data, title, years,
-                       companies, top_skills, career_text, ctx):
-    """Primary strength — built from structured, candidate-specific data.
-    Every candidate gets a unique sentence because it uses their actual
-    skill endorsement counts, durations, assessment scores, and company."""
-    co = companies[0] if companies else "their company"
-
-    if feat_idx == 0:  # career domain
-        skill_details = _get_top_skills_detailed(cid, ctx, req_filter=set(range(10)), n=2)
-        domain_kws = _get_domain_keywords_found(career_text)
-        if skill_details and domain_kws:
-            return (f"{title} with {years}yrs at {co}; "
-                    f"{domain_kws[0]} experience; top skills {' and '.join(skill_details)}.")
-        elif skill_details:
-            return f"{title} with {years}yrs at {co}; top skills {' and '.join(skill_details)}."
-        elif domain_kws:
-            return f"{title} with {years}yrs at {co}; {domain_kws[0]} domain experience."
-        return f"{title} with {years}yrs at {co}; career aligns with retrieval/ranking requirements."
-
-    elif feat_idx == 1:  # retrieval skills
-        skill_details = _get_top_skills_detailed(cid, ctx, req_filter=set(range(10)), n=3)
-        if skill_details:
-            return f"{title} with {years}yrs; verified skills: {', '.join(skill_details)}."
-        return f"{title} with {years}yrs at {co}; skills match retrieval/ranking stack."
-
-    elif feat_idx == 2:  # production
-        deploy_kws = [kw for kw in DEPLOYMENT_KEYWORDS if kw in career_text][:1]
-        scale_kws = [kw for kw in SCALE_KEYWORDS if kw in career_text][:1]
-        evidence = deploy_kws + scale_kws
-        if evidence:
-            return f"{title} at {co} with {years}yrs; career shows {' and '.join(evidence)}."
-        return f"{title} at {co} with {years}yrs; production engineering background."
-
-    elif feat_idx == 3:  # vector DB
-        tools = _get_top_skills_detailed(cid, ctx, n=3)
-        tool_names = [s["skill_name"] for s in ctx["skill_lookup"].get(cid, [])
-                      if s.get("norm_name", s["skill_name"].lower()) in VECTOR_TOOLS][:2]
-        if tool_names:
-            return f"{title} with {years}yrs at {co}; hands-on with {', '.join(tool_names)}."
-        return f"{title} with {years}yrs; vector search infrastructure experience."
-
-    elif feat_idx == 4:  # behavioral
-        row = ctx["meta_df"].iloc[ctx["cid_to_idx"][cid]]
-        rr = safe_val(row.get("recruiter_response_rate", 0.5), 0.5)
-        gh = safe_val(row.get("github_activity_score", -1), -1)
-        nd = int(safe_val(row.get("notice_period_days", 90), 90))
-        parts = [f"{title} with {years}yrs at {co}"]
-        if rr >= 0.7:
-            parts.append(f"response rate {rr:.0%}")
-        if gh > 50:
-            parts.append(f"GitHub activity {int(gh)}")
-        if nd <= 30:
-            parts.append(f"{nd}-day notice")
-        return "; ".join(parts) + "."
-
-    elif feat_idx == 5:  # LLM
-        skill_details = _get_top_skills_detailed(cid, ctx, req_filter={10, 11, 12, 13, 14}, n=2)
-        if skill_details:
-            return f"{title} with {years}yrs; LLM-adjacent: {', '.join(skill_details)}."
-        return f"{title} with {years}yrs; LLM/adjacent ML expertise complements core skills."
-
-    else:  # progression
-        return f"Strong career progression to {title} with {years}yrs at {co}."
-
-
-def _secondary_sentence(feat_idx, cid, data, top_skills, career_text, ctx):
-    """Supporting evidence — shorter, complementary to primary. Uses structured data."""
-    if feat_idx == 0:
-        domain_kws = _get_domain_keywords_found(career_text)
-        if domain_kws:
-            return f"Career includes {domain_kws[0]} work."
+def _join_skills(skills, cap_years=None):
+    if not skills:
         return ""
+    a = _skill_phrase(skills[0], cap_years)
+    return f"{a} and {_skill_phrase(skills[1], cap_years)}" if len(skills) > 1 else a
 
-    elif feat_idx == 1:
-        skill_details = _get_top_skills_detailed(cid, ctx, n=2)
-        return f"Relevant: {', '.join(skill_details)}." if skill_details else ""
 
-    elif feat_idx == 2:
-        deploy_kws = [kw for kw in DEPLOYMENT_KEYWORDS if kw in career_text][:1]
-        return f"Evidence of {deploy_kws[0]}." if deploy_kws else ""
+def _opening(title, years, company, seed):
+    t = title or "Engineer"
+    c = company or "their current company"
+    y = f"{float(years):g}"
+    templates = [
+        f"{t} at {c} with {y} years' experience.",
+        f"{y} years in, currently {t} at {c}.",
+        f"Currently {_article(t)} {t} at {c} ({y} years' experience).",
+        f"{c} {t}; {y} years of experience overall.",
+    ]
+    return templates[seed % len(templates)]
 
-    elif feat_idx == 3:
+
+def _strength(anchor, cid, ctx, data, row, seed, cap_years):
+    if anchor in (0, 1):
+        sk = _top_skills(cid, ctx, must_only=True, n=2, exclude_cv_speech=True)
+        if not sk:
+            sk = _top_skills(cid, ctx, must_only=True, n=2)
+        if sk:
+            blob = _join_skills(sk, cap_years)
+            templates = [
+                f"Brings strong hands-on {blob}, the core of what the JD wants in a ranking/retrieval hire.",
+                f"Deep, well-endorsed experience in {blob} — a direct match for the role's retrieval and ranking mandate.",
+                f"Core expertise in {blob} maps cleanly onto the JD's must-have retrieval/ranking stack.",
+            ]
+            return templates[seed % len(templates)]
+        return "Background aligns with the JD's retrieval and ranking focus."
+
+    if anchor == 2:
+        ct = (data.get("career_text", "") or "").lower()
+        ev = [k for k in (DEPLOYMENT_KEYWORDS + SCALE_KEYWORDS) if k in ct][:2]
+        ev_txt = f" ({', '.join(ev)})" if ev else ""
+        templates = [
+            f"Track record of shipping systems to production{ev_txt}, matching the JD's emphasis on real-user impact.",
+            f"Shows the scrappy-shipper profile the JD calls for, with production evidence{ev_txt}.",
+        ]
+        return templates[seed % len(templates)]
+
+    if anchor == 3:
         tools = [s["skill_name"] for s in ctx["skill_lookup"].get(cid, [])
                  if s.get("norm_name", s["skill_name"].lower()) in VECTOR_TOOLS][:2]
-        return f"Hands-on with {', '.join(tools)}." if tools else ""
+        if tools:
+            return (f"Hands-on with {', '.join(tools)}, directly covering the JD's "
+                    f"vector-search / hybrid-retrieval requirement.")
+        return "Infrastructure experience relevant to the JD's vector-search needs."
 
-    elif feat_idx == 4:
-        return "Strong platform engagement signals."
+    if anchor == 4:
+        rr = float(safe_val(row.get("recruiter_response_rate", 0.5), 0.5))
+        gh = float(safe_val(row.get("github_activity_score", -1), -1))
+        otw = bool(safe_val(row.get("open_to_work", False), False))
+        bits = []
+        if rr >= 0.7:
+            bits.append(f"replies to {int(rr * 100)}% of recruiters")
+        if gh > 50:
+            bits.append("active on GitHub")
+        if otw:
+            bits.append("marked open to work")
+        return "Strong availability signals: " + ", ".join(bits) + "." if bits else "Reasonable platform-engagement signals."
 
-    elif feat_idx == 5:
-        return "Additional LLM/NLP experience."
+    if anchor == 5:
+        sk = _top_skills(cid, ctx, must_only=False, n=2)
+        if sk:
+            return f"Adds useful LLM-adjacent depth ({_join_skills(sk, cap_years)}), which the JD lists as a plus."
+        return "Brings LLM-adjacent experience the JD treats as a nice-to-have."
 
-    else:
-        return "Consistent career growth."
+    return "Shows steady, consistent career growth into a more senior role."
 
 
-def _concern_sentence(notice, years, response_rate, country, location, companies):
-    """Build concern from actual data — returns the most relevant one."""
+def _secondary(anchor, cid, ctx, strength_text, cap_years):
+    s_low = strength_text.lower()
+    if anchor in (0, 1):
+        for s in _top_skills(cid, ctx, must_only=True, n=4, exclude_cv_speech=True):
+            if s["skill_name"].lower() not in s_low:
+                return f"Also brings {_skill_phrase(s, cap_years)}."
+        for s in _top_skills(cid, ctx, must_only=False, n=2):
+            if s["skill_name"].lower() not in s_low:
+                return f"Also brings {_skill_phrase(s, cap_years)} (a JD nice-to-have)."
+        return ""
+    if anchor == 2:
+        return "Also shows production-deployment experience."
+    if anchor == 3:
+        for t in [s["skill_name"] for s in ctx["skill_lookup"].get(cid, [])
+                  if s.get("norm_name", s["skill_name"].lower()) in VECTOR_TOOLS]:
+            if t.lower() not in s_low:
+                return f"Also hands-on with {t}."
+        return ""
+    if anchor == 4:
+        return "On-platform signals suggest they're reachable."
+    if anchor == 5:
+        return "Some additional LLM/NLP exposure on top of core skills."
+    return ""
+
+
+def _concern(notice, years, rr, country, location, willing, data):
     if notice > 90:
-        return f"Note: {notice}-day notice period significantly exceeds JD's 30-day preference."
-    if notice > 60:
-        return f"Note: {notice}-day notice period exceeds JD's 30-day preference."
-    if years < 4:
-        return f"Note: {years}yrs experience is below the 5-9yr target range."
+        return f"Main caveat: a {notice}-day notice period, well beyond the JD's sub-30-day preference."
+    if not location_in_scope(country, location, willing):
+        return (f"Logistics risk: based in {location}, outside India and not flagged open to "
+                f"relocation (the JD doesn't sponsor visas).")
     if years > 12:
-        return f"Note: {years}yrs experience is above the 5-9yr target range."
-    if response_rate < 0.2:
-        return f"Note: low recruiter response rate ({response_rate:.0%}) may indicate limited availability."
-    if "india" not in country.lower():
-        return f"Note: based in {location}, outside preferred India locations."
-
-    non_empty = [co for co in companies if co and co.strip()]
-    if non_empty:
-        all_svc = all(any(sf in co.lower() for sf in SERVICES_FIRMS) for co in non_empty)
-        if all_svc:
-            return f"Note: entire career at services firms ({', '.join(str(c) for c in non_empty[:2])})."
-
+        return f"At {float(years):g} years they sit above the 5–9-year target band, so seniority/cost fit needs a check."
+    if years < 4:
+        return f"At {float(years):g} years they're below the 5–9-year target band, so depth would need verifying."
+    if rr < 0.2:
+        return f"Low recruiter response rate ({int(rr * 100)}%) hints at limited current availability."
+    if notice > 60:
+        return f"Notice period of {notice} days is above the JD's sub-30-day preference."
+    comps = [c for c in data.get("career_companies", []) if c and str(c).strip()]
+    if comps and all(any(sf in str(c).lower() for sf in SERVICES_FIRMS) for c in comps):
+        return f"Entire career at services firms ({', '.join(str(c) for c in comps[:2])}), which the JD flags."
     return ""
 
 
 def generate_reasoning(cid, rank, features, idx, ctx):
-    """Build data-driven reasoning string."""
-    data = ctx["nested"].get(cid, {})
     row = ctx["meta_df"].iloc[idx]
+    data = ctx["nested"].get(cid, {})
 
-    title = str(row["current_title"])
-    years = round(float(row["years_of_experience"]), 1)
+    title = str(row.get("current_title", "") or "").strip()
+    years = round(float(row.get("years_of_experience", 0) or 0), 1)
+    company = str(row.get("current_company", "") or "").strip()
+    if not company:
+        comps = data.get("career_companies", [])
+        company = comps[0] if comps else "their current company"
     country = str(row.get("country", "") or "")
-    location_str = str(row.get("location", "") or "")
-    location = f"{location_str}, {country}" if country else location_str
+    loc = str(row.get("location", "") or "")
+    location = f"{loc}, {country}" if country and country.lower() not in loc.lower() else (loc or country)
+
     notice = int(safe_val(row.get("notice_period_days", 90), 90))
-    response_rate = float(safe_val(row.get("recruiter_response_rate", 0.5), 0.5))
-    companies = data.get("career_companies", [])[:3]
-    top_skills = data.get("skill_names", [])[:5]
-    career_text = data.get("career_text", "").lower()
+    rr = float(safe_val(row.get("recruiter_response_rate", 0.5), 0.5))
+    willing = bool(safe_val(row.get("willing_to_relocate", False), False))
 
-    # SENTENCE 1: Primary strength (highest WEIGHTED contribution, not raw value)
-    FEATURE_WEIGHTS = [0.32, 0.26, 0.15, 0.10, 0.10, 0.04, 0.03]
-    sorted_f = sorted(enumerate(features),
-                      key=lambda x: x[1] * FEATURE_WEIGHTS[x[0]], reverse=True)
-    best_i, best_v = sorted_f[0]
-    s1 = _strength_sentence(best_i, cid, data, title, years,
-                            companies, top_skills, career_text, ctx)
+    seed = _reason_seed(cid)
+    order = sorted(range(len(features)), key=lambda i: features[i] * _FEATURE_WEIGHTS[i], reverse=True)
+    anchor = order[0]
 
-    # SENTENCE 2: Secondary strength (if significant)
-    second_i, second_v = sorted_f[1]
-    s2 = ""
-    if second_v > 0.3:
-        s2 = _secondary_sentence(second_i, cid, data, top_skills, career_text, ctx)
+    opening = _opening(title, years, company, seed)
+    strength = _strength(anchor, cid, ctx, data, row, seed, years)
+    concern = _concern(notice, years, rr, country, location, willing, data)
 
-    # SENTENCE 3: Concern (data-driven)
-    s3 = _concern_sentence(notice, years, response_rate,
-                           country, location, companies)
+    parts = [opening, strength]
+    if rank <= 25:
+        sec = _secondary(order[1], cid, ctx, strength, years)
+        if sec:
+            parts.append(sec)
+    if concern and (rank <= 60 or notice > 90 or years < 4 or years > 12):
+        parts.append(concern)
 
-    # Assemble by rank band
-    if rank <= 10:
-        parts = [s for s in [s1, s2, s3] if s]
-    elif rank <= 30:
-        parts = [s1, s3] if s3 else [s1, s2] if s2 else [s1]
-    elif rank <= 60:
-        parts = [s1, s3] if s3 else [s1]
-    else:
-        parts = [s1]
-        if s3:
-            parts.append(s3)
-
-    # Clean: remove double spaces, ensure no newlines (CSV safety)
-    reasoning = " ".join(parts).replace("\n", " ").replace("  ", " ").strip()
-    # Truncate to safe length for CSV
-    return reasoning[:500]
+    text = " ".join(p for p in parts if p)
+    text = " ".join(text.split()).replace("\n", " ")
+    return text[:480]
 
 
 # ============================================================================
@@ -1195,18 +1264,14 @@ def generate_reasoning(cid, rank, features, idx, ctx):
 # ============================================================================
 
 def write_csv(top_100, ctx):
-    """Write submission CSV. Validates format before writing."""
     log.info("=== Writing CSV ===")
 
-    # Re-sort by ROUNDED score to handle tie-breaking after rounding
-    # Validator requires: equal scores → candidate_id ascending
     top_100_rounded = [(idx, cid, round(score, 6), features)
                        for idx, cid, score, features in top_100]
     top_100_rounded.sort(key=lambda x: (-x[2], x[1]))
 
     with open(OUTPUT_PATH, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        # CRITICAL: column order must be candidate_id, rank, score, reasoning
         writer.writerow(["candidate_id", "rank", "score", "reasoning"])
         for rank, (idx, cid, score, features) in enumerate(top_100_rounded, 1):
             reasoning = generate_reasoning(cid, rank, features, idx, ctx)
@@ -1214,7 +1279,6 @@ def write_csv(top_100, ctx):
 
     log.info(f"CSV written to {OUTPUT_PATH} with {len(top_100)} candidates")
 
-    # Quick self-validation
     with open(OUTPUT_PATH, "r", encoding="utf-8") as f:
         reader = csv.reader(f)
         header = next(reader)
@@ -1224,18 +1288,16 @@ def write_csv(top_100, ctx):
         f"Header mismatch: {header}"
     assert len(rows) <= 100, f"Expected <= 100 rows, got {len(rows)}"
 
-    # Check scores are non-increasing
     scores = [float(r[2]) for r in rows]
     cids = [r[0] for r in rows]
     for i in range(len(scores) - 1):
         assert scores[i] >= scores[i + 1], \
             f"Score not non-increasing at rank {i+1}: {scores[i]} < {scores[i+1]}"
-        # Check tie-break: equal scores → candidate_id ascending
         if scores[i] == scores[i + 1]:
             assert cids[i] < cids[i + 1], \
                 f"Tie-break violated at rank {i+1}: {cids[i]} > {cids[i+1]}"
 
-    log.info("✅ Self-validation passed: header, 100 rows, non-increasing scores, tie-breaks")
+    log.info("✅ Self-validation passed: header, <=100 rows, non-increasing scores, tie-breaks")
 
 
 # ============================================================================
@@ -1243,30 +1305,23 @@ def write_csv(top_100, ctx):
 # ============================================================================
 
 def main():
-    global ARTIFACTS_DIR, OUTPUT_PATH
+    global ARTIFACTS_DIR, OUTPUT_PATH, UPLOADED_CIDS
 
     parser = argparse.ArgumentParser(
-        description="Redrob AI Candidate Ranking System v15"
+        description="Redrob AI Candidate Ranking System (small-sample)"
     )
-    parser.add_argument(
-        "--candidates", type=str, default=None,
-        help="Path to candidates.jsonl (not used directly — artifacts must "
-             "already be precomputed. Kept for spec compliance.)"
-    )
-    parser.add_argument(
-        "--artifacts", type=str, default="./artifacts",
-        help="Path to precomputed artifacts directory (default: ./artifacts)"
-    )
-    parser.add_argument(
-        "--out", type=str, default="./submission.csv",
-        help="Output CSV path (default: ./submission.csv)"
-    )
+    parser.add_argument("--candidates", type=str, default=None,
+                        help="Path to uploaded sample (JSON array or JSONL). "
+                             "Restricts ranking to these candidate IDs.")
+    parser.add_argument("--artifacts", type=str, default="./artifacts",
+                        help="Path to precomputed artifacts directory")
+    parser.add_argument("--out", type=str, default="./submission.csv",
+                        help="Output CSV path")
     args = parser.parse_args()
 
     ARTIFACTS_DIR = args.artifacts
     OUTPUT_PATH = args.out
 
-    global UPLOADED_CIDS
     if args.candidates and os.path.exists(args.candidates):
         import json
         try:
@@ -1287,27 +1342,17 @@ def main():
 
     total_t0 = time.time()
     log.info("=" * 60)
-    log.info("RANK.PY — Redrob AI Candidate Ranking System v15")
+    log.info("RANK_SMALL.PY — Redrob AI Candidate Ranking System")
     log.info("=" * 60)
     log.info(f"Artifacts: {ARTIFACTS_DIR}")
     log.info(f"Output:    {OUTPUT_PATH}")
 
-    # Load artifacts
     ctx = load_artifacts()
-
-    # Stage 1: Retrieval + filtering + scoring → top 500
     top_n, behavioral_arr = stage_1(ctx)
-
-    # Stage 2: Cross-encoder on top 500
     cross_scores = stage_2(top_n, ctx)
-
-    # Stage 3: 7-feature scoring → top 100
     top_100 = stage_3(top_n, cross_scores, ctx)
-
-    # Write CSV with reasoning
     write_csv(top_100, ctx)
 
-    # Summary
     total_time = time.time() - total_t0
     log.info(f"\n{'='*60}")
     log.info(f"RANKING COMPLETE in {total_time:.1f}s ({total_time/60:.1f} min)")
@@ -1318,8 +1363,7 @@ def main():
     else:
         log.info(f"\u2705 Within budget: {total_time:.0f}s / 300s")
 
-    # Print top 10
-    log.info("\n--- TOP 10 ---")
+    log.info("\n--- TOP RESULTS ---")
     for rank, (idx, cid, score, features) in enumerate(top_100[:10], 1):
         title = str(ctx["titles_arr"][idx])
         years = float(ctx["years_arr"][idx])

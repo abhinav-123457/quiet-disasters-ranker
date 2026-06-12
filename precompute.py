@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-precompute.py — Redrob AI Candidate Ranking System 
+precompute.py — Redrob AI Candidate Ranking System
 Run on Kaggle/Colab (GPU) to generate all artifacts for offline ranking.
 """
 
 # ============================================================================
 # CONFIGURE THESE PATHS FOR YOUR ENVIRONMENT
 # ============================================================================
-CANDIDATES_PATH = "./candidates.jsonl"
-OUT_DIR = "./artifacts/"
+CANDIDATES_PATH = "/kaggle/input/datasets/abhinavshakya2005/candidates-jsonl/candidates.jsonl"
+OUT_DIR = "/kaggle/working/artifacts/"
 # ============================================================================
 
 import json
@@ -40,6 +40,11 @@ JD_CORE = (
     "Ship v2 ranking system, set up offline benchmarks and A/B testing. "
     "5-9 years experience, product company preferred, strong Python."
 )
+
+# BGE query-side instruction. Applied ONLY to query texts (what we search FOR) —
+# i.e. JD queries and archetypes — never to candidate passages or to symmetric
+# skill-name matching. Required for bge-small-en-v1.5 retrieval quality.
+BGE_QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
 
 JD_QUERIES = [
     # Query 0: Core domain — search/ranking/retrieval
@@ -108,10 +113,6 @@ ARCHETYPES = [
 ]
 
 
-
-
-
-
 # ============================================================================
 # 3. LOAD CANDIDATES
 # ============================================================================
@@ -142,8 +143,8 @@ def save_models(out_dir):
     ce_path = os.path.join(out_dir, "models", "ce")
 
     if not os.path.exists(os.path.join(bi_path, "config.json")):
-        log.info("Downloading bi-encoder: all-MiniLM-L6-v2 ...")
-        bi_model = SentenceTransformer("all-MiniLM-L6-v2")
+        log.info("Downloading bi-encoder: BAAI/bge-small-en-v1.5 ...")
+        bi_model = SentenceTransformer("BAAI/bge-small-en-v1.5")
         bi_model.save(bi_path)
         log.info(f"Bi-encoder saved to {bi_path}")
     else:
@@ -151,8 +152,8 @@ def save_models(out_dir):
         bi_model = SentenceTransformer(bi_path)
 
     if not os.path.exists(os.path.join(ce_path, "config.json")):
-        log.info("Downloading cross-encoder: ms-marco-MiniLM-L-6-v2 ...")
-        ce_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        log.info("Downloading cross-encoder: ms-marco-MiniLM-L-12-v2 ...")
+        ce_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-12-v2")
         ce_model.save(ce_path)
         log.info(f"Cross-encoder saved to {ce_path}")
     else:
@@ -166,17 +167,25 @@ def save_models(out_dir):
 # ============================================================================
 
 def encode_jd_artifacts(bi_model, out_dir):
-    """Encode JD queries, skills, and archetypes."""
+    """Encode JD queries, skills, and archetypes.
+
+    BGE instruction is applied to the QUERY side only (JD queries + archetypes,
+    which represent 'what we search for'). Candidate passages and symmetric
+    skill-name matching are encoded WITHOUT the instruction.
+    """
     log.info("Encoding JD queries...")
-    jd_query_embs = bi_model.encode(JD_QUERIES, normalize_embeddings=True)
+    jd_query_texts = [BGE_QUERY_INSTRUCTION + q for q in JD_QUERIES]
+    jd_query_embs = bi_model.encode(jd_query_texts, normalize_embeddings=True)
     np.save(os.path.join(out_dir, "jd_query_embeddings.npy"), jd_query_embs)
 
     log.info("Encoding JD skills...")
+    # Skill matching is symmetric (short skill name <-> short JD skill) -> no prefix
     jd_skill_embs = bi_model.encode(JD_SKILLS, normalize_embeddings=True)
     np.save(os.path.join(out_dir, "jd_skill_embeddings.npy"), jd_skill_embs)
 
     log.info("Encoding archetypes...")
-    arch_embs = bi_model.encode(ARCHETYPES, normalize_embeddings=True)
+    arch_texts = [BGE_QUERY_INSTRUCTION + a for a in ARCHETYPES]
+    arch_embs = bi_model.encode(arch_texts, normalize_embeddings=True)
     np.save(os.path.join(out_dir, "archetype_embeddings.npy"), arch_embs)
 
     log.info("JD artifacts saved.")
@@ -233,6 +242,7 @@ def encode_candidates(bi_model, candidates, out_dir):
 
     log.info("Encoding candidates (this may take a while)...")
     t0 = time.time()
+    # Candidate texts are PASSAGES -> no BGE query instruction.
     unique_embs = bi_model.encode(
         unique_texts,
         normalize_embeddings=True,
@@ -309,7 +319,7 @@ def compute_skill_matches(bi_model, candidates, jd_skill_embs, out_dir):
     unique_skills = sorted(all_skill_names)
     log.info(f"Unique skills across all candidates: {len(unique_skills)}")
 
-    # Encode all unique skills
+    # Encode all unique skills (symmetric matching -> no BGE query instruction)
     skill_embs = bi_model.encode(unique_skills, normalize_embeddings=True,
                                   batch_size=512, show_progress_bar=True)
     skill_to_emb = dict(zip(unique_skills, skill_embs))
@@ -439,6 +449,9 @@ def extract_metadata(candidates, out_dir):
             "profile_views_received_30d": s.get("profile_views_received_30d", 0),
             "applications_submitted_30d": s.get("applications_submitted_30d", 0),
             "connection_count": s.get("connection_count", 0),
+            # Location/availability signals (used by rank.py JD-fit logic)
+            "willing_to_relocate": s.get("willing_to_relocate", False),
+            "preferred_work_mode": s.get("preferred_work_mode", ""),
         })
 
     meta_df = pd.DataFrame(flat)

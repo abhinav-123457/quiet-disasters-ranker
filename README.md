@@ -13,10 +13,10 @@ We deliberately avoid the "one LLM call per candidate" approach. That cannot sca
 ## 1. Architecture at a glance
 
 ```
-candidates.jsonl ──(precompute.py, offline, one-time)──▶ artifacts/  (~770 MB)
+candidates.jsonl ──(precompute.py, offline, one-time)──▶ artifacts/  (~850 MB)
                                                               │
                                                               ▼
-                                          rank.py  (CPU-only, offline, ~60s)
+                                          rank.py  (CPU-only, offline, ~90 - 110s)
                                                               │
                                                               ▼
                                                        submission.csv  (top 100)
@@ -55,7 +55,7 @@ pip install -r requirements.txt
 python precompute.py --candidates ./candidates.jsonl --out-dir ./artifacts/
 ```
 
-This reads `candidates.jsonl`, downloads the bi-encoder (`all-MiniLM-L6-v2`) and cross-encoder (`cross-encoder/ms-marco-MiniLM-L-6-v2`), computes embeddings for all 100K candidates, builds the FAISS index, and **saves the cross-encoder into `artifacts/models/ce`** so the ranking step needs no network. Output: `./artifacts/` (~770 MB). Network is used here (model download) and this phase may exceed 5 minutes — both are allowed for precompute.
+This reads `candidates.jsonl`, downloads the bi-encoder (`BAAI/bge-small-en-v1.5`) and cross-encoder (`cross-encoder/ms-marco-MiniLM-L-12-v2`), computes embeddings for all 100K candidates, builds the FAISS index, and **saves the cross-encoder into `artifacts/models/ce`** so the ranking step needs no network. Output: `./artifacts/` (~850 MB). Network is used here (model download) and this phase may exceed 5 minutes — both are allowed for precompute.
 
 ### Step 2 — Rank (the single submission command)
 
@@ -63,7 +63,7 @@ This reads `candidates.jsonl`, downloads the bi-encoder (`all-MiniLM-L6-v2`) and
 python rank.py --candidates ./candidates.jsonl --artifacts ./artifacts --out ./submission.csv
 ```
 
-This is the **single command that produces the submission CSV** (Section 10.3). It runs **entirely on CPU**, makes **no network calls** (the cross-encoder loads from the local `artifacts/models/ce` path), and completes in **~60 seconds** on a 10-core CPU — well within the 5-minute budget. It outputs exactly 100 candidates with monotonically non-increasing scores, deterministic tie-breaks (equal scores ordered by `candidate_id` ascending), and per-candidate reasoning strings. The script self-validates header, row count, monotonicity, and tie-breaks before writing.
+This is the **single command that produces the submission CSV** (Section 10.3). It runs **entirely on CPU**, makes **no network calls** (the cross-encoder loads from the local `artifacts/models/ce` path), and completes in **~110 - 205 seconds** on a 10-core CPU — well within the 5-minute budget. It outputs exactly 100 candidates with monotonically non-increasing scores, deterministic tie-breaks (equal scores ordered by `candidate_id` ascending), and per-candidate reasoning strings. The script self-validates header, row count, monotonicity, and tie-breaks before writing.
 
 > Note: `rank.py` reads the precomputed `artifacts/` (representing all 100K candidates) rather than re-parsing the raw file; the `--candidates` flag is accepted for spec-command compatibility. This is what allows the ranking step to stay within the CPU/time budget.
 
@@ -80,7 +80,7 @@ python validate_submission.py submission.csv
 
 | Constraint | Limit | Our ranking step |
 | --- | --- | --- |
-| Runtime | ≤ 5 min | ~60 s |
+| Runtime | ≤ 5 min | ~110 - 205 s |
 | Memory | ≤ 16 GB | within budget |
 | Compute | CPU only | CPU only (no GPU) |
 | Network | Off | Off — cross-encoder loaded from local `artifacts/models/ce` |
@@ -92,21 +92,21 @@ python validate_submission.py submission.csv
 
 ### Stage 1 — Retrieval (100K → 500)
 Builds a high-recall candidate pool by taking the **union** of three signals, then trims to the top 500:
-- **Dense semantic search** via `all-MiniLM-L6-v2` embeddings + FAISS (top results from a 1000-vector search).
-- **Skill match pool** — candidates with the most JD must-have skill matches.
+- **Dense semantic search** via `BAAI/bge-small-en-v1.5` embeddings (384-dim) + FAISS. JD queries and role archetypes are encoded with BGE's query-side instruction; candidate profiles are encoded as passages.
+- **Skill match pool** — candidates with the most JD must-have skill matches (threshold auto-calibrated at precompute).
 - **Behavioral pool** — top candidates by availability signals.
 
 Non-technical titles and hard honeypots are excluded before scoring.
 
 ### Stage 2 — Cross-encoder re-ranking (500)
-Runs `cross-encoder/ms-marco-MiniLM-L-6-v2` locally on CPU over the 500-candidate pool, scoring deep JD-relevance that the bi-encoder misses. Outputs are sigmoid-normalized.
+Runs `cross-encoder/ms-marco-MiniLM-L-12-v2` locally on CPU over the 500-candidate pool, scoring deep JD-relevance that the bi-encoder misses. Outputs are sigmoid-normalized.
 
 ### Stage 3 — Seven-feature weighted scoring
 Each candidate's final score is a weighted blend of:
 
 | Feature | Weight | What it measures |
 | --- | --- | --- |
-| Career domain evidence | 0.32 | Cross-encoder + semantic relevance to the JD domain |
+| Career domain evidence | 0.32 | Cross-encoder + semantic relevance to the JD domain (+ product-company lift) |
 | Retrieval / search expertise | 0.26 | Depth & coverage of retrieval / vector-DB skills |
 | Production deployment | 0.15 | Evidence of shipping/scaling ML in production |
 | Vector-DB infrastructure | 0.10 | Direct tool detection (Pinecone, Milvus, Weaviate, Qdrant, FAISS) |
@@ -115,15 +115,23 @@ Each candidate's final score is a weighted blend of:
 | Career progression | 0.03 | Title trajectory (junior → senior) |
 
 Skill credibility is itself a weighted blend: `0.35·proficiency + 0.25·endorsements + 0.25·duration + 0.15·assessment`.
+**JD-fit signals** (reading what the JD means, not just keywords)
 
 ### Multiplicative penalties
+- **Product-company evidence (lift):** real tenure at a product company raises domain evidence — a candidate who built a recommender at a product company isn't buried for lacking buzzwords.
 - **Keyword-stuffer (×0.20):** many JD-matching skills but near-zero duration/endorsements.
 - **Services-firm (×0.40 / ×0.80):** candidates from services firms lacking product-company domain evidence (×0.40 when domain is weak, ×0.80 when partial).
+- **Title-chaser / job-hopping (×0.90):** short average tenure with rising titles — the pattern the JD calls out.
+- **CV/speech/robotics without NLP/IR (×0.85):** the JD says these are not a fit without retrieval/NLP depth.
+- **Research-only without production (×0.70):** the JD explicitly rejects pure-research profiles.
+- **Recent-framework-only (×0.92):** LangChain/LLM-API only, no pre-LLM ML depth.
+- **Location (×0.85):** outside India and not open to relocation (the JD doesn't sponsor visas).
+- **Experience band (gentle nudge, ×0.80 minimum):** soft down-weight outside the 5–9yr range — deliberately gentle because the JD treats 5–9 as "a range, not a requirement" and asks that strong candidates outside it still be considered.
 - **Honeypot soft penalties (×0.75 / ×0.50):** profiles with suspicious-but-not-conclusive impossibility signals.
 - **Availability cap (0.80):** prevents behavioral signals from overwhelming domain expertise.
 
 ### Reasoning generation
-Reasoning strings are **built from each candidate's parsed attributes** (current title, company, exact skill durations in months, endorsement counts, assessment scores, availability) — not from templates and not from a generative model. This guarantees every claim corresponds to a real profile field (no hallucination) and that strings vary across candidates. The narrative is anchored on the **highest weighted-contribution** feature, and acknowledges concerns (e.g. long notice period) where present.
+Reasoning strings are **built from each candidate's parsed attributes** current title, company, years of experience, named skills with endorsement counts and durations, and behavioral signals — in plain , varied language (no templated skeleton, no internal model scores).  The narrative is anchored on the highest weighted-contribution feature, connects to specific **JD** requirements, and **acknowledges** concerns honestly (long notice period, off-band experience, location, services-only career) where present. Every claim corresponds to a real profile field (no hallucination) and strings vary structurally across candidates.
 
 ---
 
@@ -132,8 +140,8 @@ Reasoning strings are **built from each candidate's parsed attributes** (current
 The dataset seeds ~80 honeypot profiles (subtly impossible: e.g. 8 years at a 3-year-old company; "expert" in 10 skills with 0 months used) that are forced to ground-truth tier 0. Submissions with a honeypot rate > 10% in the top 100 are disqualified at Stage 3.
 
 We use an explicit two-layer detector:
-- **Layer 1 (precompute):** flags profiles claiming high proficiency with zero duration.
-- **Layer 2 (runtime):** catches ghost skills (0 endorsements + 0 duration yet high JD match) and implausibly broad coverage.
+- **Layer 1 (precompute):** flags profiles claiming high proficiency with zero duration, timeline mismatches, and experience inflation.
+- **Layer 2 (runtime):**  catches ghost skills (0 endorsements + 0 duration yet high JD match) and implausibly broad coverage.
 
 Hard-flagged honeypots are excluded from the pool; borderline cases receive soft score penalties. Measured honeypot rate in our final top-100 submission: **0%**.
 
@@ -179,6 +187,6 @@ Per Section 10.5, the sandbox only needs to handle a small sample and complete w
 
 ## 8. Development & AI tooling
 
-This submission was built by Team Quiet Disasters with AI tools used as assisted-engineering aids inside the Antigravity IDE (primarily Claude Opus 4.8). The architecture, feature design, weighting, dataset/schema handling, and all validation were done by the team. LLM assistance was concentrated on two implementation areas — the batch-optimized FAISS retrieval logic and the edge-case logic for the two-layer honeypot detector — driven by our own written audits of the pipeline. Full per-tool declaration is in `submission_metadata.yaml`.
+This submission was built by Team Quiet Disasters with AI tools used as assisted-engineering aids. Full per-tool declaration is in `submission_metadata.yaml`.
 
 No candidate data is sent to any hosted LLM during ranking; the ranking step runs fully offline on CPU.

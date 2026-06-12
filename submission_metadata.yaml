@@ -32,11 +32,15 @@ compute:
   pre_computation_time_minutes: 6
 ai_tools_used:
   - "Claude (Opus 4.8)"
+  - "Claude (Fable 5)"
   - "ChatGPT"
   
 ai_usage_summary: |
   We used LLMs as assisted-engineering tools, driven by our own audits and design
-  decisions, inside the Antigravity IDE (primarily Claude Opus 4.8).
+  decisions. For the finalization of our architecture we held the debate between 
+  ChatGPT and Opus 4.8 on our architecture about pro and cons and after that
+  one they both come to agree on final architecture and the procedure we started
+  developing our MVP / Prototype .
   The architecture, feature design, weighting, dataset schema mapping, and all
   validation were done by the human team. We wrote detailed audits of our pipeline
   and fed those to the LLM to refine specific components.
@@ -47,6 +51,7 @@ ai_usage_summary: |
   by the team, with the LLM used for code review and debugging.
   No candidate data was sent to any hosted LLM during ranking; the ranking step
   runs fully offline on CPU.
+  
 methodology_summary: |
   Our system uses a deterministic, multi-stage retrieval and ranking pipeline that
   runs completely offline on CPU in about 60 seconds — well within the 5-minute

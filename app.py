@@ -3,687 +3,338 @@ import subprocess
 import pandas as pd
 import os
 import time
+import json
 
-st.set_page_config(page_title="Quiet Disasters · AI Ranker", layout="wide", page_icon="🏆")
+st.set_page_config(page_title="Quiet Disasters · AI Ranker", layout="wide", page_icon="◆")
 
+# ════════════════════════════════════════════════════════════
+#  THEME — formal, modern, restrained (Inter + one calm accent)
+# ════════════════════════════════════════════════════════════
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap');
 
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root{
+  --bg:#0a0c11; --surface:#11141c; --surface-2:#0d1016;
+  --border:#1e2430; --border-hi:#2b3342;
+  --text:#e8eaf0; --muted:#9aa3b5; --faint:#5b6478;
+  --accent:#5b8cff; --accent-soft:rgba(91,140,255,.12);
+  --ok:#3fb950; --ok-soft:rgba(63,185,80,.12);
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body,[data-testid="stAppViewContainer"]{
+  background:var(--bg)!important;color:var(--text)!important;
+  font-family:'Inter',sans-serif!important;
+  -webkit-font-smoothing:antialiased;
+}
+[data-testid="stHeader"],[data-testid="stToolbar"],[data-testid="stSidebar"],footer{display:none!important}
+[data-testid="stAppViewContainer"] > .main{padding:0!important}
 
-html, body, [data-testid="stAppViewContainer"] {
-    background: #07090f !important;
-    color: #e2e4ed !important;
-    font-family: 'Syne', sans-serif !important;
-}
-[data-testid="stAppViewContainer"] > .main { padding: 0 !important; }
-[data-testid="stHeader"],
-[data-testid="stToolbar"],
-[data-testid="stSidebar"],
-footer { display: none !important; }
-
-.block-container {
-    padding: 0 !important;
-    max-width: 100% !important;
-}
-[data-testid="stVerticalBlock"] > div { gap: 0 !important; }
-
-/* ══════════════════════════════════
-   CENTERED COLUMN — the ONE truth
-   ══════════════════════════════════ */
-.center-col {
-    max-width: 560px;
-    margin: 0 auto;
-    padding: 0 24px;
-}
-
-/* ══════════════════════════════════
-   HERO
-   ══════════════════════════════════ */
-.hero {
-    background: #07090f;
-    border-bottom: 1px solid #10141f;
-    padding: 72px 24px 56px;
-    text-align: center;
-    position: relative;
-    overflow: hidden;
-}
-.hero::before {
-    content: '';
-    position: absolute;
-    top: -160px; right: -80px;
-    width: 500px; height: 500px;
-    background: radial-gradient(circle, rgba(255,75,43,0.09) 0%, transparent 65%);
-    pointer-events: none;
-}
-.hero::after {
-    content: '';
-    position: absolute;
-    bottom: -100px; left: 20%;
-    width: 360px; height: 360px;
-    background: radial-gradient(circle, rgba(99,102,241,0.05) 0%, transparent 65%);
-    pointer-events: none;
-}
-.hero-inner {
-    max-width: 680px;
-    margin: 0 auto;
-    position: relative;
-    z-index: 1;
-}
-.status-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    font-family: 'Space Mono', monospace;
-    font-size: 10px;
-    letter-spacing: 0.12em;
-    color: #4dda7a;
-    background: rgba(77,218,122,0.07);
-    border: 1px solid rgba(77,218,122,0.18);
-    border-radius: 999px;
-    padding: 6px 13px;
-    margin-bottom: 28px;
-    text-transform: uppercase;
-}
-.status-dot {
-    width: 5px; height: 5px;
-    border-radius: 50%;
-    background: #4dda7a;
-    animation: blink 2.2s ease-in-out infinite;
-}
-@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.25} }
-
-.hero-title {
-    font-family: 'Syne', sans-serif;
-    font-size: clamp(2.4rem, 5vw, 3.8rem);
-    font-weight: 800;
-    line-height: 1.06;
-    color: #edeef5;
-    letter-spacing: -0.025em;
-    margin-bottom: 18px;
-}
-.hero-title em { color: #FF4B2B; font-style: normal; }
-
-.hero-sub {
-    font-size: 14.5px;
-    color: #5a6080;
-    line-height: 1.7;
-    max-width: 480px;
-    margin: 0 auto 36px;
-}
-.hero-sub code {
-    font-family: 'Space Mono', monospace;
-    font-size: 12px;
-    background: #10141f;
-    border: 1px solid #1a2030;
-    border-radius: 5px;
-    padding: 1px 6px;
-    color: #FF4B2B;
-}
-
-.chip-row {
-    display: flex;
-    gap: 8px;
-    justify-content: center;
-    flex-wrap: wrap;
-}
-.chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    font-family: 'Space Mono', monospace;
-    font-size: 10px;
-    letter-spacing: 0.07em;
-    padding: 6px 12px;
-    border-radius: 999px;
-    border: 1px solid;
-    white-space: nowrap;
-    width: auto;
-    min-width: unset;
-}
-.chip-a { border-color: #1a2e40; color: #4da8da; background: rgba(77,168,218,0.05); }
-.chip-b { border-color: #1a2e1a; color: #4dda7a; background: rgba(77,218,122,0.05); }
-.chip-c { border-color: #2e1a1a; color: #da8a4d; background: rgba(218,138,77,0.05); }
-
-/* ══════════════════════════════════
-   MAIN CONTENT COLUMN
-   ══════════════════════════════════ */
-.main-content {
-    max-width: 560px;
-    margin: 0 auto;
-    padding: 48px 24px 64px;
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-}
-
-/* ── Card ── */
-.card {
-    background: #0c0f1a;
-    border: 1px solid #13182a;
-    border-radius: 16px;
-    padding: 24px;
-}
-.card-header {
-    margin-bottom: 16px;
-}
-.card-title {
-    font-size: 13px;
-    font-weight: 700;
-    color: #c8cce0;
-    letter-spacing: 0.01em;
-    margin-bottom: 3px;
-}
-.card-hint {
-    font-family: 'Space Mono', monospace;
-    font-size: 10px;
-    color: #2e3450;
-    letter-spacing: 0.06em;
-}
-
-/* ── Upload zone ── */
-[data-testid="stFileUploader"] {
-    background: #07090f !important;
-    border: 1.5px dashed #1a2035 !important;
-    border-radius: 12px !important;
-    padding: 0 !important;
-    transition: border-color 0.2s;
-    min-height: 180px !important;
-    display: flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-}
-[data-testid="stFileUploader"]:hover {
-    border-color: rgba(255,75,43,0.4) !important;
-}
-[data-testid="stFileUploader"] section {
-    padding: 32px 20px !important;
-    display: flex !important;
-    flex-direction: column !important;
-    align-items: center !important;
-    justify-content: center !important;
-    gap: 8px !important;
-    width: 100% !important;
-}
-[data-testid="stFileUploader"] label {
-    color: #3a4060 !important;
-    font-family: 'Syne', sans-serif !important;
-    font-size: 13px !important;
-    text-align: center !important;
-}
-[data-testid="stFileUploader"] small {
-    font-family: 'Space Mono', monospace !important;
-    font-size: 10px !important;
-    color: #252a3a !important;
-}
-
-/* ── Success / error alerts ── */
-[data-testid="stAlert"] {
-    border-radius: 10px !important;
-    font-family: 'Syne', sans-serif !important;
-    font-size: 13px !important;
-    padding: 10px 14px !important;
-    margin-top: 12px !important;
-    margin-bottom: 0 !important;
-}
-
-/* ── Action buttons — stacked, fit-content, centered ── */
-.action-stack {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 10px;
-}
-
-[data-testid="stButton"] > button {
-    font-family: 'Syne', sans-serif !important;
-    font-weight: 700 !important;
-    font-size: 13px !important;
-    letter-spacing: 0.03em !important;
-    border-radius: 9px !important;
-    transition: all 0.16s ease !important;
-    cursor: pointer !important;
-    /* key: fit the label, don't stretch */
-    width: 100% !important;
-    padding: 12px 28px !important;
-    border: none !important;
-}
-[data-testid="stButton"] > button[kind="primary"] {
-    background: linear-gradient(135deg, #FF4B2B, #FF6840) !important;
-    color: #fff !important;
-    box-shadow: 0 4px 20px rgba(255,75,43,0.22) !important;
-}
-[data-testid="stButton"] > button[kind="primary"]:hover {
-    box-shadow: 0 6px 28px rgba(255,75,43,0.42) !important;
-    transform: translateY(-1px) !important;
-}
-[data-testid="stButton"] > button[kind="secondary"] {
-    background: transparent !important;
-    color: #4a5270 !important;
-    border: 1px solid #13182a !important;
-}
-[data-testid="stButton"] > button[kind="secondary"]:hover {
-    border-color: #FF4B2B !important;
-    color: #e2e4ed !important;
-    background: rgba(255,75,43,0.04) !important;
-}
-
-/* ── Divider between stacked buttons ── */
-.btn-divider {
-    font-family: 'Space Mono', monospace;
-    font-size: 10px;
-    color: #1e2235;
-    letter-spacing: 0.1em;
-    text-align: center;
-}
-
-/* ══════════════════════════════════
-   RESULTS
-   ══════════════════════════════════ */
-.result-meta {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 14px;
-    background: #07090f;
-    border: 1px solid #13182a;
-    border-radius: 8px;
-    margin-bottom: 14px;
-}
-.result-ok {
-    font-family: 'Space Mono', monospace;
-    font-size: 10px;
-    color: #4dda7a;
-    background: rgba(77,218,122,0.08);
-    border: 1px solid rgba(77,218,122,0.2);
-    border-radius: 5px;
-    padding: 2px 8px;
-    letter-spacing: 0.07em;
-}
-.result-time {
-    font-family: 'Space Mono', monospace;
-    font-size: 11px;
-    color: #4dda7a;
-}
-.result-n {
-    font-family: 'Space Mono', monospace;
-    font-size: 11px;
-    color: #252a3a;
-    margin-left: auto;
-}
-
-[data-testid="stDataFrame"] {
-    border-radius: 10px !important;
-    border: 1px solid #13182a !important;
-    overflow: hidden !important;
-}
-[data-testid="stDownloadButton"] > button {
-    font-family: 'Syne', sans-serif !important;
-    font-weight: 600 !important;
-    font-size: 12px !important;
-    background: transparent !important;
-    border: 1px solid #13182a !important;
-    color: #4a5270 !important;
-    border-radius: 8px !important;
-    padding: 9px 18px !important;
-    transition: all 0.15s !important;
-    margin-top: 12px !important;
-}
-[data-testid="stDownloadButton"] > button:hover {
-    border-color: #FF4B2B !important;
-    color: #e2e4ed !important;
-}
-[data-testid="stExpander"] {
-    background: #07090f !important;
-    border: 1px solid #13182a !important;
-    border-radius: 9px !important;
-    margin-top: 10px !important;
-}
-[data-testid="stExpander"] summary {
-    font-family: 'Space Mono', monospace !important;
-    font-size: 11px !important;
-    color: #2e3450 !important;
-}
-[data-testid="stSpinner"] p { color: #FF4B2B !important; font-size: 13px !important; }
-
-@media (max-width: 600px) {
-    .main-content { padding: 32px 16px 48px; }
-    .hero { padding: 48px 16px 40px; }
-}
-
-/* ════════════════════════════════════════════════════════════
-   ✦ ENHANCEMENT LAYER — animations only, appended (cascade-safe)
-   ════════════════════════════════════════════════════════════ */
-@keyframes fadeUp   { from{opacity:0; transform:translateY(16px)} to{opacity:1; transform:translateY(0)} }
-@keyframes fadeIn   { from{opacity:0} to{opacity:1} }
-@keyframes pop      { 0%{opacity:0; transform:scale(.85)} 60%{transform:scale(1.04)} 100%{opacity:1; transform:scale(1)} }
-@keyframes gradShift{ 0%{background-position:0% 50%} 50%{background-position:100% 50%} 100%{background-position:0% 50%} }
-@keyframes auroraDrift{
-  0%   { transform:translate(0,0) scale(1) }
-  33%  { transform:translate(4%,-3%) scale(1.08) }
-  66%  { transform:translate(-3%,4%) scale(1.04) }
-  100% { transform:translate(0,0) scale(1) }
-}
-@keyframes shimmer  { 0%{left:-60%} 60%{left:130%} 100%{left:130%} }
-@keyframes glowPulse{ 0%,100%{box-shadow:0 0 0 0 rgba(77,218,122,.5)} 50%{box-shadow:0 0 0 4px rgba(77,218,122,0)} }
-@keyframes rowIn    { from{opacity:0; transform:translateY(8px)} to{opacity:1; transform:translateY(0)} }
-
-/* Aurora background — drifting color fields behind everything */
+/* single, static, very faint top glow — no animation */
 [data-testid="stAppViewContainer"]::before{
-  content:''; position:fixed; inset:-20% -10% -10% -10%; z-index:0; pointer-events:none;
-  background:
-    radial-gradient(38% 42% at 18% 20%, rgba(255,75,43,0.10) 0%, transparent 60%),
-    radial-gradient(34% 40% at 82% 12%, rgba(99,102,241,0.09) 0%, transparent 60%),
-    radial-gradient(40% 44% at 70% 88%, rgba(77,168,218,0.07) 0%, transparent 62%);
-  filter:blur(8px);
-  animation:auroraDrift 26s ease-in-out infinite;
+  content:'';position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:radial-gradient(60% 40% at 50% -8%, rgba(91,140,255,.08) 0%, transparent 70%);
 }
-/* Faint moving grid for depth */
-[data-testid="stAppViewContainer"]::after{
-  content:''; position:fixed; inset:0; z-index:0; pointer-events:none; opacity:.5;
-  background-image:
-    linear-gradient(rgba(120,130,180,0.035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(120,130,180,0.035) 1px, transparent 1px);
-  background-size:46px 46px;
-  mask-image:radial-gradient(circle at 50% 30%, #000 0%, transparent 75%);
-  -webkit-mask-image:radial-gradient(circle at 50% 30%, #000 0%, transparent 75%);
+
+.block-container{max-width:760px!important;margin:0 auto!important;padding:0 24px 72px!important;position:relative;z-index:1}
+[data-testid="stVerticalBlock"]>div{gap:0!important}
+
+/* ── HERO ── */
+.hero{text-align:center;padding:80px 0 30px}
+.eyebrow{
+  font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:500;
+  letter-spacing:.34em;color:var(--faint);text-transform:uppercase;
+  display:flex;align-items:center;justify-content:center;gap:9px;margin-bottom:26px;
 }
-/* keep all real content above the aurora */
-.hero, .main-content { position:relative; z-index:1; }
-
-/* Entrances */
-.hero       { animation:fadeUp .65s cubic-bezier(.22,.61,.36,1) both; }
-.hero-sub   { animation:fadeIn 1s ease .25s both; }
-.card       { animation:fadeUp .55s cubic-bezier(.22,.61,.36,1) both;
-              transition:transform .2s ease, border-color .2s ease, box-shadow .2s ease; }
-.card:hover { transform:translateY(-2px); border-color:#23304d;
-              box-shadow:0 10px 40px -12px rgba(0,0,0,.6); }
-.chip       { animation:pop .5s cubic-bezier(.34,1.56,.64,1) both; }
-.chip-a{ animation-delay:.05s } .chip-b{ animation-delay:.15s } .chip-c{ animation-delay:.25s }
-
-/* Animated gradient hero title */
+.eyebrow .dot{width:5px;height:5px;border-radius:50%;background:var(--accent)}
 .hero-title{
-  background:linear-gradient(100deg,#edeef5 0%,#edeef5 38%,#ff8a6b 50%,#edeef5 62%,#edeef5 100%);
-  background-size:220% auto;
-  -webkit-background-clip:text; background-clip:text;
-  -webkit-text-fill-color:transparent;
-  animation:gradShift 7s linear infinite;
+  font-size:clamp(2.1rem,4.6vw,3.1rem);font-weight:800;line-height:1.08;
+  letter-spacing:-.03em;color:var(--text);margin-bottom:18px;
 }
-.hero-title em{
-  -webkit-text-fill-color:#FF4B2B; color:#FF4B2B;
+.hero-title em{font-style:normal;color:var(--accent)}
+.hero-sub{font-size:15px;line-height:1.7;color:var(--muted);max-width:500px;margin:0 auto 30px}
+.hero-sub code{
+  font-family:'JetBrains Mono',monospace;font-size:12.5px;
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:5px;padding:2px 7px;color:var(--accent);
 }
-
-/* Live status dot — add a soft pulsing halo */
-.status-dot{ animation:blink 2.2s ease-in-out infinite, glowPulse 2.2s ease-in-out infinite; }
-
-/* Primary button — shimmer sweep + smoother lift */
-[data-testid="stButton"] > button[kind="primary"]{ position:relative; overflow:hidden; }
-[data-testid="stButton"] > button[kind="primary"]::after{
-  content:''; position:absolute; top:0; left:-60%; width:45%; height:100%;
-  background:linear-gradient(100deg, transparent, rgba(255,255,255,.35), transparent);
-  transform:skewX(-18deg); animation:shimmer 3.6s ease-in-out infinite;
-}
-[data-testid="stButton"] > button:active{ transform:translateY(0) scale(.985) !important; }
-
-/* Uploader: animate the dashed border tint on hover (already has hover color) */
-[data-testid="stFileUploader"]{ transition:border-color .25s ease, background .25s ease !important; }
-[data-testid="stFileUploader"]:hover{ background:rgba(255,75,43,0.02) !important; }
-
-/* Results reveal */
-.result-meta{ animation:fadeUp .5s ease both; }
-[data-testid="stDataFrame"]{ animation:fadeUp .55s ease .05s both;
-  transition:border-color .2s ease; }
-[data-testid="stDataFrame"]:hover{ border-color:#23304d !important; }
-[data-testid="stDownloadButton"] > button{ transition:all .18s ease !important; }
-[data-testid="stDownloadButton"] > button:hover{ transform:translateY(-1px); }
-
-/* Alerts gently fade in */
-[data-testid="stAlert"]{ animation:fadeIn .4s ease both; }
-
-/* Respect reduced-motion users */
-@media (prefers-reduced-motion: reduce){
-  *{ animation:none !important; }
+.chip-row{display:flex;gap:9px;justify-content:center;flex-wrap:wrap}
+.chip{
+  font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.02em;
+  color:var(--muted);background:var(--surface);border:1px solid var(--border);
+  border-radius:7px;padding:7px 13px;white-space:nowrap;
 }
 
-/* ════════════════════════════════════════════════════════════
-   ✦ LAYOUT FIX — center into a narrow column, full-bleed hero,
-   shorter upload zone. (appended → wins the cascade)
-   ════════════════════════════════════════════════════════════ */
-.block-container{
-  max-width:720px !important;
-  margin:0 auto !important;
-  padding:0 20px 48px !important;
+/* ── SECTION LABELS (no boxes — they sit above controls) ── */
+.section{margin:34px 0 12px}
+.section-num{
+  font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;
+  color:var(--accent);letter-spacing:.1em;
 }
-/* hero still spans the full viewport even though the column is narrow */
-.hero{
-  width:100vw !important;
-  margin-left:calc(50% - 50vw) !important;
-  padding:46px 24px 38px !important;
-}
-/* the orphaned wrapper no longer needs a width of its own */
-.main-content{ max-width:100% !important; padding:30px 0 0 !important; gap:14px !important; }
-/* shorter, less stretched upload drop-zone */
-[data-testid="stFileUploader"]{ min-height:124px !important; }
-[data-testid="stFileUploader"] section{ padding:20px 18px !important; }
-/* slightly tighter cards */
-.card{ padding:20px 22px !important; }
+.section-title{font-size:16px;font-weight:700;color:var(--text);margin:4px 0 2px;letter-spacing:-.01em}
+.section-hint{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--faint);letter-spacing:.03em}
 
-/* ════════════════════════════════════════════════════════════
-   ✦ HERO POLISH — spotlight, title glow, accent line, chip hover
-   ════════════════════════════════════════════════════════════ */
-/* soft spotlight directly behind the title for depth */
-.hero-inner{ position:relative; }
-.hero-inner::before{
-  content:''; position:absolute; left:50%; top:38%;
-  width:620px; height:320px; transform:translate(-50%,-50%);
-  background:radial-gradient(ellipse at center, rgba(255,75,43,0.10) 0%, transparent 70%);
-  filter:blur(10px); pointer-events:none; z-index:0;
-  animation:fadeIn 1.2s ease both;
+/* ── UPLOADER styled as one clean card ── */
+[data-testid="stFileUploader"]{
+  background:var(--surface-2)!important;border:1.5px dashed var(--border-hi)!important;
+  border-radius:12px!important;padding:0!important;min-height:120px!important;
+  display:flex!important;align-items:center!important;justify-content:center!important;
+  transition:border-color .2s,background .2s;
 }
-.hero-inner > *{ position:relative; z-index:1; }
+[data-testid="stFileUploader"]:hover{border-color:var(--accent)!important;background:var(--accent-soft)!important}
+[data-testid="stFileUploader"] section{padding:22px!important;background:transparent!important}
+[data-testid="stFileUploader"] label,[data-testid="stFileUploader"] span,[data-testid="stFileUploader"] div{color:var(--muted)!important}
+[data-testid="stFileUploader"] small{font-family:'JetBrains Mono',monospace!important;color:var(--faint)!important}
 
-/* tighter, sleeker title + subtle glow */
-.hero-title{
-  font-size:clamp(2.3rem, 4.4vw, 3.35rem) !important;
-  line-height:1.02 !important;
-  letter-spacing:-0.03em !important;
-  max-width:680px; margin-left:auto; margin-right:auto;
-  filter:drop-shadow(0 4px 30px rgba(255,75,43,0.14));
+/* ── BUTTONS — flat, formal ── */
+[data-testid="stButton"]>button{
+  font-family:'Inter',sans-serif!important;font-weight:600!important;font-size:14px!important;
+  letter-spacing:.01em!important;border-radius:10px!important;width:100%!important;
+  padding:13px 24px!important;transition:all .16s ease!important;
 }
+[data-testid="stButton"]>button[kind="primary"]{
+  background:var(--accent)!important;color:#fff!important;border:1px solid var(--accent)!important;
+  box-shadow:0 4px 16px -6px rgba(91,140,255,.5)!important;
+}
+[data-testid="stButton"]>button[kind="primary"]:hover{filter:brightness(1.08)!important;transform:translateY(-1px)!important}
+[data-testid="stButton"]>button[kind="primary"]:disabled{
+  background:var(--surface)!important;color:var(--faint)!important;border-color:var(--border)!important;box-shadow:none!important;
+}
+[data-testid="stButton"]>button[kind="secondary"]{
+  background:transparent!important;color:var(--muted)!important;border:1px solid var(--border-hi)!important;
+}
+[data-testid="stButton"]>button[kind="secondary"]:hover{border-color:var(--accent)!important;color:var(--text)!important}
+.btn-divider{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--faint);text-align:center;margin:8px 0;letter-spacing:.1em}
 
-/* refined live badge — soft outer glow ring */
-.status-badge{
-  box-shadow:0 0 0 1px rgba(77,218,122,0.10), 0 0 22px -6px rgba(77,218,122,0.45);
-  backdrop-filter:blur(4px);
+[data-testid="stAlert"]{border-radius:9px!important;font-size:13.5px!important;border:1px solid var(--border)!important;margin-top:12px!important}
+
+/* ── STATUS / SPINNER ── */
+[data-testid="stStatusWidget"],[data-testid="stStatus"]{
+  background:var(--surface)!important;border:1px solid var(--border)!important;border-radius:10px!important;
 }
 
-/* thin animated accent line between sub-text and chips */
-.hero-sub{ position:relative; }
-.hero-sub::after{
-  content:''; display:block; width:54px; height:2px; margin:26px auto 0;
-  border-radius:2px;
-  background:linear-gradient(90deg, transparent, #FF4B2B, transparent);
-  background-size:200% auto;
-  animation:gradShift 4s linear infinite;
+/* ── METRICS ── */
+.metric-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:8px 0 18px}
+@media(max-width:600px){.metric-grid{grid-template-columns:repeat(2,1fr)}}
+.metric-card{background:var(--surface);border:1px solid var(--border);border-radius:11px;padding:14px;text-align:center}
+.m-val{font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:700;color:var(--text)}
+.m-val.accent{color:var(--accent)}
+.m-lab{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.13em;color:var(--faint);margin-top:5px;text-transform:uppercase}
+
+/* ── TOP-10 PODIUM ── */
+.pod-card{display:flex;gap:14px;background:var(--surface);border:1px solid var(--border);border-radius:11px;padding:15px 16px;margin-bottom:10px;animation:fadeUp .35s ease both}
+.pod-card:hover{border-color:var(--border-hi)}
+.pod-rank{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:15px;min-width:46px;height:46px;border-radius:10px;display:flex;align-items:center;justify-content:center;border:1px solid var(--border);color:var(--muted);background:var(--surface-2)}
+.pod-1 .pod-rank{color:#e8c468;border-color:rgba(232,196,104,.4);background:rgba(232,196,104,.07)}
+.pod-2 .pod-rank{color:#c3cad8;border-color:rgba(195,202,216,.32);background:rgba(195,202,216,.05)}
+.pod-3 .pod-rank{color:#cf9b6b;border-color:rgba(207,155,107,.4);background:rgba(207,155,107,.07)}
+.pod-body{flex:1;min-width:0}
+.pod-top{display:flex;align-items:center;gap:10px;margin-bottom:7px}
+.pod-cid{font-family:'JetBrains Mono',monospace;font-size:12.5px;color:var(--accent);font-weight:500}
+.pod-score{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--ok);margin-left:auto}
+.pod-bar{height:4px;border-radius:2px;background:var(--surface-2);overflow:hidden;margin-bottom:9px}
+.pod-bar span{display:block;height:100%;border-radius:2px;background:var(--accent)}
+.pod-text{font-size:13px;line-height:1.62;color:var(--muted)}
+
+/* ── TABS / DATAFRAME / DOWNLOAD ── */
+[data-testid="stTabs"] button{font-family:'Inter',sans-serif!important;font-size:13px!important;font-weight:600!important;color:var(--faint)!important}
+[data-testid="stTabs"] button[aria-selected="true"]{color:var(--text)!important}
+[data-testid="stTabs"] [data-baseweb="tab-highlight"]{background:var(--accent)!important}
+[data-testid="stDataFrame"]{border-radius:10px!important;border:1px solid var(--border)!important;overflow:hidden!important}
+[data-testid="stDownloadButton"]>button{
+  font-family:'Inter',sans-serif!important;font-weight:600!important;font-size:13px!important;
+  background:transparent!important;border:1px solid var(--border-hi)!important;color:var(--muted)!important;
+  border-radius:9px!important;padding:10px 18px!important;margin-top:12px!important;transition:all .15s;
 }
+[data-testid="stDownloadButton"]>button:hover{border-color:var(--accent)!important;color:var(--text)!important}
+.stCode,pre{border-radius:9px!important}
 
-/* chips: lift + glow on hover */
-.chip{ transition:transform .18s ease, box-shadow .18s ease, border-color .18s ease; }
-.chip:hover{ transform:translateY(-2px); }
-.chip-a:hover{ box-shadow:0 6px 18px -8px rgba(77,168,218,0.6); }
-.chip-b:hover{ box-shadow:0 6px 18px -8px rgba(77,218,122,0.6); }
-.chip-c:hover{ box-shadow:0 6px 18px -8px rgba(218,138,77,0.6); }
-
-/* ✦ team wordmark above the title */
-.wordmark{
-  font-family:'Space Mono', monospace;
-  font-size:12px; letter-spacing:0.42em; font-weight:700;
-  color:#6a7290; text-transform:uppercase;
-  display:flex; align-items:center; justify-content:center; gap:10px;
-  margin-bottom:18px;
-  animation:fadeIn .9s ease .1s both;
-}
-.wordmark .wm-mark{ color:#FF4B2B; font-size:10px; letter-spacing:0; animation:blink 2.6s ease-in-out infinite; }
-
+@keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+.hero,.section,.metric-grid{animation:fadeUp .5s ease both}
+@media(prefers-reduced-motion:reduce){*{animation:none!important}}
 </style>
 """, unsafe_allow_html=True)
 
-# ══════════════════════════════════════════════════════
-# HERO
-# ══════════════════════════════════════════════════════
+# ── HERO ──
 st.markdown("""
 <div class="hero">
-  <div class="hero-inner">
-    <div style="display:flex;justify-content:center;margin-bottom:28px">
-      <span class="status-badge"><span class="status-dot"></span>Sandbox Active</span>
-    </div>
-    <div class="wordmark"><span class="wm-mark">◆</span>QUIET&nbsp;DISASTERS</div>
-    <div class="hero-title">Candidate <em>Ranking</em> System</div>
-    <div class="hero-sub">
-      Run the <code>rank.py</code> pipeline on precomputed artifacts
-      to surface the top 100 candidates from your dataset —
-      entirely on CPU, no network required.
-    </div>
-    <div class="chip-row">
-      <span class="chip chip-a">🖥 CPU only · No GPU</span>
-      <span class="chip chip-b">⚡ &lt; 5 min · Budget compliant</span>
-      <span class="chip chip-c">🔌 No network · Fully offline</span>
-    </div>
+  <div class="eyebrow"><span class="dot"></span>Quiet Disasters · Sandbox</div>
+  <div class="hero-title">Candidate <em>Ranking</em> System</div>
+  <div class="hero-sub">
+    A multi-stage retrieval &amp; ranking pipeline that surfaces the strongest
+    candidates for the role — running entirely on CPU, within the
+    competition's 5-minute budget.
+  </div>
+  <div class="chip-row">
+    <span class="chip">CPU only · no GPU</span>
+    <span class="chip">bge-small + MiniLM-L-12 reranker</span>
+    <span class="chip">Offline ranking · no API calls</span>
   </div>
 </div>
 """, unsafe_allow_html=True)
 
-# ══════════════════════════════════════════════════════
-# UPLOAD CARD
-# ══════════════════════════════════════════════════════
-st.markdown('<div class="main-content">', unsafe_allow_html=True)
 
+def count_candidates(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+        if content.startswith("["):
+            return len(json.loads(content))
+        return sum(1 for l in content.split("\n") if l.strip())
+    except Exception:
+        return None
+
+
+# ── SECTION 1: DATA ──
 st.markdown("""
-<div class="card">
-  <div class="card-header">
-    <div class="card-title">Upload Candidates Sample</div>
-    <div class="card-hint">.JSONL &nbsp;or&nbsp; .JSON</div>
-  </div>
+<div class="section">
+  <div class="section-num">01</div>
+  <div class="section-title">Provide candidates</div>
+  <div class="section-hint">.jsonl or .json · up to 100 candidates</div>
 </div>
 """, unsafe_allow_html=True)
 
-# Streamlit uploader rendered INSIDE the card area
-# (We close the card-header in HTML above; the uploader sits below via st.*)
-uploaded_file = st.file_uploader(
-    "Drag & drop or click to upload",
-    type=["jsonl", "json"],
-    label_visibility="collapsed",
-)
+uploaded_file = st.file_uploader("Upload candidates", type=["jsonl", "json"],
+                                 label_visibility="collapsed")
 
 if uploaded_file is not None:
     with open("./candidates.jsonl", "wb") as f:
         f.write(uploaded_file.getbuffer())
-    st.success(f"✅  **{uploaded_file.name}** · {uploaded_file.size:,} bytes ready")
+    st.session_state.sample_loaded = False
+    n = count_candidates("./candidates.jsonl")
+    st.success(f"**{uploaded_file.name}** · {uploaded_file.size:,} bytes"
+               + (f" · **{n} candidates parsed**" if n else ""))
 
-# ══════════════════════════════════════════════════════
-# EXECUTE CARD
-# ══════════════════════════════════════════════════════
+if uploaded_file is None and os.path.exists("sample_candidates.json"):
+    if st.button("Load the bundled 50-candidate sample", type="secondary",
+                 use_container_width=True):
+        with open("sample_candidates.json", "rb") as src, open("./candidates.jsonl", "wb") as dst:
+            dst.write(src.read())
+        st.session_state.sample_loaded = True
+    if st.session_state.get("sample_loaded"):
+        n = count_candidates("./candidates.jsonl")
+        st.success(f"Bundled sample loaded · **{n} candidates** ready")
+
+data_ready = (uploaded_file is not None) or st.session_state.get("sample_loaded", False)
+
+# ── SECTION 2: RUN ──
 st.markdown("""
-<div class="card" style="margin-top:16px">
-  <div class="card-header">
-    <div class="card-title">Execute Pipeline</div>
-    <div class="card-hint">Select a data source and run</div>
-  </div>
+<div class="section">
+  <div class="section-num">02</div>
+  <div class="section-title">Execute pipeline</div>
+  <div class="section-hint">sample ≈ 1 min · full 100K run may take several minutes on Space CPU</div>
 </div>
 """, unsafe_allow_html=True)
 
-run_uploaded = st.button(
-    "▷  Run on Uploaded Sample",
-    type="primary",
-    disabled=(uploaded_file is None),
-    use_container_width=True,
-)
+run_uploaded = st.button("Run on provided sample", type="primary",
+                         disabled=(not data_ready), use_container_width=True)
+st.markdown('<div class="btn-divider">OR</div>', unsafe_allow_html=True)
+run_preloaded = st.button("Run on pre-loaded 100K dataset", type="secondary",
+                          use_container_width=True)
 
-st.markdown('<div class="btn-divider">or</div>', unsafe_allow_html=True)
-
-run_preloaded = st.button(
-    "⚡  Run on Pre-loaded 100K Dataset",
-    type="secondary",
-    use_container_width=True,
-)
-
-st.markdown('</div>', unsafe_allow_html=True)  # /main-content
-
-# ══════════════════════════════════════════════════════
-# EXECUTION LOGIC  (untouched)
-# ══════════════════════════════════════════════════════
+# ── EXECUTION (live streamed) ──
 if run_uploaded or run_preloaded:
     if not os.path.exists("./artifacts"):
-        st.markdown('<div class="main-content" style="padding-top:0">', unsafe_allow_html=True)
-        st.error("❌  Artifacts folder not found! Ensure precomputed artifacts are uploaded to the Space.")
-        st.markdown('</div>', unsafe_allow_html=True)
+        st.error("Artifacts folder not found. Ensure precomputed artifacts are available to the Space.")
     else:
-        with st.spinner("Executing rank.py — hang tight..."):
-            start = time.time()
-            script_name = "rank_small.py" if run_uploaded else "rank.py"
-            cmd = [
-                "python", script_name,
-                "--candidates", "./candidates.jsonl",
-                "--artifacts", "./artifacts",
-                "--out",        "./submission.csv",
-            ]
-            result   = subprocess.run(cmd, capture_output=True, text=True)
+        script_name = "rank_small.py" if run_uploaded else "rank.py"
+        cmd = ["python", "-u", script_name,
+               "--candidates", "./candidates.jsonl",
+               "--artifacts", "./artifacts", "--out", "./submission.csv"]
+        start = time.time()
+        log_lines = []
+        with st.status(f"Starting {script_name} …", expanded=True) as status:
+            log_box = st.empty()
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True, bufsize=1)
+            for line in proc.stdout:
+                line = line.rstrip()
+                if not line:
+                    continue
+                log_lines.append(line)
+                if "STAGE 1" in line:
+                    status.update(label="Stage 1 / 3 — Retrieval (FAISS + skills + behavioral)")
+                elif "STAGE 2" in line:
+                    status.update(label="Stage 2 / 3 — Cross-encoder re-ranking")
+                elif "STAGE 3" in line:
+                    status.update(label="Stage 3 / 3 — Feature scoring + JD-fit signals")
+                elif "Writing CSV" in line:
+                    status.update(label="Writing ranked results")
+                log_box.code("\n".join(log_lines[-12:]), language="bash")
+            proc.wait()
             duration = time.time() - start
-
-            if result.returncode == 0:
-                st.session_state.run_success = True
-                st.session_state.run_failed  = False
-                st.session_state.duration    = duration
-                st.session_state.stderr      = result.stderr
+            if proc.returncode == 0:
+                status.update(label=f"Pipeline complete in {duration:.1f}s",
+                              state="complete", expanded=False)
             else:
-                st.session_state.run_success = False
-                st.session_state.run_failed  = True
-                st.session_state.stderr      = result.stderr
+                status.update(label="Pipeline failed — see logs", state="error")
+        st.session_state.run_success = proc.returncode == 0
+        st.session_state.run_failed = proc.returncode != 0
+        st.session_state.duration = duration
+        st.session_state.stderr = "\n".join(log_lines)
 
-# ══════════════════════════════════════════════════════
-# RESULTS
-# ══════════════════════════════════════════════════════
+# ── RESULTS ──
 if st.session_state.get("run_success", False) and os.path.exists("submission.csv"):
-    st.markdown('<div class="main-content" style="padding-top:0"><div class="card">', unsafe_allow_html=True)
-    st.markdown('<div class="card-header"><div class="card-title">Results</div></div>', unsafe_allow_html=True)
-
     df = pd.read_csv("submission.csv")
+    top_score = df["score"].max()
+
+    st.markdown("""
+    <div class="section"><div class="section-num">03</div>
+    <div class="section-title">Results</div></div>
+    """, unsafe_allow_html=True)
+
     st.markdown(f"""
-    <div class="result-meta">
-      <span class="result-ok">✓ COMPLETE</span>
-      <span class="result-time">⏱ {st.session_state.duration:.2f}s</span>
-      <span class="result-n">{len(df):,} candidates</span>
+    <div class="metric-grid">
+      <div class="metric-card"><div class="m-val accent">{top_score:.4f}</div><div class="m-lab">Top score</div></div>
+      <div class="metric-card"><div class="m-val">{df["score"].median():.4f}</div><div class="m-lab">Median</div></div>
+      <div class="metric-card"><div class="m-val">{len(df):,}</div><div class="m-lab">Ranked</div></div>
+      <div class="metric-card"><div class="m-val">{st.session_state.duration:.1f}s</div><div class="m-lab">Runtime</div></div>
     </div>
     """, unsafe_allow_html=True)
 
-    st.dataframe(
-        df,
-        column_config={
-            "rank":      st.column_config.NumberColumn("Rank",      format="%d"),
-            "score":     st.column_config.NumberColumn("Score",     format="%.6f"),
-            "reasoning": st.column_config.TextColumn("Reasoning",   width="large"),
-        },
-        use_container_width=True,
-        hide_index=True,
-    )
+    t_table, t_top, t_chart, t_logs = st.tabs(
+        ["Ranked table", "Top 10", "Scores", "Logs"])
 
-    with open("submission.csv", "rb") as f:
-        st.download_button(
-            label="📥  Download submission.csv",
-            data=f,
-            file_name="submission.csv",
-            mime="text/csv",
+    with t_table:
+        st.dataframe(
+            df,
+            column_config={
+                "rank": st.column_config.NumberColumn("Rank", format="%d"),
+                "score": st.column_config.NumberColumn("Score", format="%.6f"),
+                "reasoning": st.column_config.TextColumn("Reasoning", width="large"),
+            },
+            use_container_width=True, hide_index=True,
         )
+        with open("submission.csv", "rb") as f:
+            st.download_button("Download submission.csv", data=f,
+                               file_name="submission.csv", mime="text/csv")
 
-    with st.expander("🛠  View Pipeline Logs"):
+    with t_top:
+        for _, row in df.head(10).iterrows():
+            r = int(row["rank"])
+            cls = f"pod-card pod-{r}" if r <= 3 else "pod-card"
+            width = max(row["score"] / top_score * 100, 5)
+            st.markdown(f"""
+            <div class="{cls}">
+              <div class="pod-rank">{r}</div>
+              <div class="pod-body">
+                <div class="pod-top">
+                  <span class="pod-cid">{row["candidate_id"]}</span>
+                  <span class="pod-score">{row["score"]:.6f}</span>
+                </div>
+                <div class="pod-bar"><span style="width:{width:.1f}%"></span></div>
+                <div class="pod-text">{row["reasoning"]}</div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    with t_chart:
+        st.bar_chart(df.set_index("rank")["score"], height=260, color="#5b8cff")
+        st.caption("Score by rank — non-increasing by construction.")
+
+    with t_logs:
         st.code(st.session_state.stderr, language="bash")
 
-    st.markdown('</div></div>', unsafe_allow_html=True)
-
 elif st.session_state.get("run_failed", False):
-    st.markdown('<div class="main-content" style="padding-top:0"><div class="card">', unsafe_allow_html=True)
-    st.markdown('<div class="card-header"><div class="card-title">Pipeline Error</div></div>', unsafe_allow_html=True)
-    st.error("❌  Execution failed. Check logs below.")
+    st.error("Execution failed. Logs below.")
     st.code(st.session_state.stderr, language="bash")
-    st.markdown('</div></div>', unsafe_allow_html=True)
